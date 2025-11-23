@@ -8,8 +8,8 @@ import streamlit.components.v1 as components
 import os
 
 # --- CONFIGURATION ---
-# Users will paste keys in the sidebar
-DEFAULT_API_KEY = "AIzaSyA7Yk4WRdSu976U4EpHZN47m" 
+# Leave empty for GitHub (User pastes in Sidebar for security)
+DEFAULT_API_KEY = "" 
 WEATHER_API_KEY = "11b260a4212d29eaccbd9754da459059" 
 
 st.set_page_config(page_title="VisionRain Data Core", layout="wide", page_icon="🛰️")
@@ -23,15 +23,19 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# --- HELPER: ROBUST IMAGE LOADER ---
+# --- ROBUST IMAGE LOADER (Prevents Crashes) ---
 def load_image_from_url(url):
+    """Fetches an image with headers to prevent 403/404 errors from servers."""
     try:
-        headers = {'User-Agent': 'Mozilla/5.0'}
-        r = requests.get(url, headers=headers, timeout=5)
-        return Image.open(BytesIO(r.content))
-    except: return None
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
+        response = requests.get(url, headers=headers, timeout=5)
+        response.raise_for_status()
+        return Image.open(BytesIO(response.content))
+    except Exception as e:
+        # st.error(f"Image Load Error: {e}") # Optional: Hide error from UI
+        return None
 
-# --- DATA FETCHING ---
+# --- DATA FETCHING FUNCTIONS ---
 def get_nasa_feed(lat, lon):
     today = datetime.datetime.utcnow().strftime("%Y-%m-%d")
     bbox = f"{lat-5},{lon-5},{lat+5},{lon+5}" 
@@ -43,6 +47,7 @@ def get_nasa_feed(lat, lon):
         "BBOX": bbox, "WIDTH": "800", "HEIGHT": "800", "TIME": today
     }
     try:
+        # Construct URL manually to pass to our robust loader
         full_url = requests.Request('GET', url, params=params).prepare().url
         return load_image_from_url(full_url), today
     except: return None, None
@@ -53,6 +58,7 @@ def get_weather_telemetry(lat, lon):
             url = f"https://api.openweathermap.org/data/2.5/weather?lat={lat}&lon={lon}&appid={WEATHER_API_KEY}&units=metric"
             return requests.get(url).json()['main']
         except: pass
+    # Fallback Simulation
     return {"humidity": 65, "temp": 32, "pressure": 1012} 
 
 # --- SIDEBAR ---
@@ -61,6 +67,7 @@ with st.sidebar:
     st.title("VisionRain")
     st.caption("Data Verification System")
     
+    st.markdown("### 🔑 Access Keys")
     api_key = st.text_input("Google AI Key", value=DEFAULT_API_KEY, type="password")
     weather_key = st.text_input("OpenWeatherMap Key", value=WEATHER_API_KEY, type="password")
     
@@ -97,7 +104,7 @@ with tab1:
                         st.image(img, caption=f"Live Feed: {date}", use_column_width=True)
                         st.session_state['sat_img'] = img
                     else:
-                        st.warning("Orbit Offline. Using Backup.")
+                        st.warning("Orbit Offline (Night). Using Backup.")
                         url = "https://upload.wikimedia.org/wikipedia/commons/thumb/5/5e/Cumulonimbus_cloud_over_Singapore.jpg/800px-Cumulonimbus_cloud_over_Singapore.jpg"
                         st.session_state['sat_img'] = load_image_from_url(url)
                         st.image(st.session_state['sat_img'], caption="Backup: Archive Storm")
@@ -153,7 +160,7 @@ with tab1:
                 components.html(html_map, height=300)
                 st.caption("Layer: OWM Global Precipitation")
         else:
-            # STATIC BACKUP
+            # STATIC IMAGE FOR AI ANALYSIS
             radar_url = "https://upload.wikimedia.org/wikipedia/commons/thumb/b/b7/Radar_reflectivity.jpg/600px-Radar_reflectivity.jpg"
             st.session_state['rad_img'] = load_image_from_url(radar_url)
             if st.session_state['rad_img']:
