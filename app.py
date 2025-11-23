@@ -5,15 +5,13 @@ import requests
 import datetime
 from io import BytesIO
 import streamlit.components.v1 as components
-import folium
-from streamlit_folium import st_folium
+import os
 
 # --- CONFIGURATION ---
-# Leave empty for GitHub (User pastes in Sidebar for security)
 DEFAULT_API_KEY = "AIzaSyAZsUnki7M2SJjPYfZ5NHJ8LX3xMtboUDU" 
 WEATHER_API_KEY = "11b260a4212d29eaccbd9754da459059" 
 
-st.set_page_config(page_title="VisionRain Data Core", layout="wide", page_icon="🛰️")
+st.set_page_config(page_title="VisionRain Data Core", layout="wide", page_icon="⛈️")
 
 # --- STYLING ---
 st.markdown("""
@@ -32,7 +30,18 @@ def load_image_from_url(url):
         return Image.open(BytesIO(r.content))
     except: return None
 
-# --- DATA FETCHING ---
+# --- 1. GEOCODING (City Search) ---
+def get_coordinates(city_name, api_key):
+    if not api_key: return None, None
+    try:
+        url = f"http://api.openweathermap.org/geo/1.0/direct?q={city_name}&limit=1&appid={api_key}"
+        data = requests.get(url).json()
+        if data:
+            return data[0]['lat'], data[0]['lon']
+    except: pass
+    return None, None
+
+# --- 2. NASA SATELLITE ---
 def get_nasa_feed(lat, lon):
     today = datetime.datetime.utcnow().strftime("%Y-%m-%d")
     bbox = f"{lon-5},{lat-5},{lon+5},{lat+5}" 
@@ -48,6 +57,7 @@ def get_nasa_feed(lat, lon):
         return load_image_from_url(full_url), today
     except: return None, None
 
+# --- 3. WEATHER TELEMETRY ---
 def get_weather_telemetry(lat, lon):
     if WEATHER_API_KEY:
         try:
@@ -56,7 +66,7 @@ def get_weather_telemetry(lat, lon):
         except: pass
     return {"humidity": 65, "temp": 32, "pressure": 1012} 
 
-# --- SIDEBAR: MISSION CONTROL ---
+# --- SIDEBAR ---
 with st.sidebar:
     st.image("https://cdn-icons-png.flaticon.com/512/414/414927.png", width=80)
     st.title("VisionRain")
@@ -66,37 +76,37 @@ with st.sidebar:
     weather_key = st.text_input("OpenWeatherMap Key", value=WEATHER_API_KEY, type="password")
     
     st.markdown("---")
-    st.markdown("### 📍 Select Target on Map")
+    st.markdown("### 📍 Mission Target")
     
-    # --- INTERACTIVE MAP SELECTOR ---
-    # Default to Riyadh if no click yet
-    if 'lat' not in st.session_state: st.session_state['lat'] = 24.7136
-    if 'lon' not in st.session_state: st.session_state['lon'] = 46.6753
-
-    m = folium.Map(location=[st.session_state['lat'], st.session_state['lon']], zoom_start=5)
-    m.add_child(folium.LatLngPopup()) # Allows clicking to get coords
+    target_name = st.text_input("Region Name", "Jeddah")
     
-    # Render Map and capture click
-    map_data = st_folium(m, height=250, width=280)
+    # Initialize defaults if needed
+    if 'lat' not in st.session_state: st.session_state['lat'] = 21.5433
+    if 'lon' not in st.session_state: st.session_state['lon'] = 39.1728
 
-    # Update State if Clicked
-    if map_data['last_clicked']:
-        st.session_state['lat'] = map_data['last_clicked']['lat']
-        st.session_state['lon'] = map_data['last_clicked']['lng']
-        st.rerun() # Refresh app with new coords
+    if st.button("Find Location"):
+        if weather_key:
+            new_lat, new_lon = get_coordinates(target_name, weather_key)
+            if new_lat:
+                st.session_state['lat'] = new_lat
+                st.session_state['lon'] = new_lon
+                st.success(f"Locked: {target_name}")
+            else:
+                st.error("City not found.")
+        else:
+            st.warning("Need Weather Key to search!")
 
-    # Display Current Coords
     col1, col2 = st.columns(2)
-    col1.metric("Lat", f"{st.session_state['lat']:.4f}")
-    col2.metric("Lon", f"{st.session_state['lon']:.4f}")
+    with col1: 
+        lat = st.number_input("Latitude", value=st.session_state['lat'], format="%.4f")
+    with col2: 
+        lon = st.number_input("Longitude", value=st.session_state['lon'], format="%.4f")
     
-    lat = st.session_state['lat']
-    lon = st.session_state['lon']
-    st.success("Target Locked")
+    st.map({"lat": [lat], "lon": [lon]})
 
 # --- MAIN DASHBOARD ---
 st.title("VisionRain Data Command Center")
-st.markdown(f"### *Sector Analysis Coordinates: {lat:.4f}, {lon:.4f}*")
+st.markdown(f"### *Sector Analysis: {target_name} ({lat}, {lon})*")
 
 tab1, tab2 = st.tabs(["📡 Data Verification (Live)", "🧠 AI Analysis (Gemini)"])
 
@@ -113,10 +123,10 @@ with tab1:
         
         if source_opt == "Live Feed (NASA)":
             if st.button("📡 ACQUIRE LIVE SIGNAL"):
-                with st.spinner(f"Re-orienting Satellite..."):
+                with st.spinner(f"Connecting to Suomi NPP over {target_name}..."):
                     img, date = get_nasa_feed(lat, lon)
                     if img:
-                        st.image(img, caption=f"Live Feed: {date} | VIIRS/Suomi NPP", use_column_width=True)
+                        st.image(img, caption=f"Live Feed: {date}", use_column_width=True)
                         st.session_state['sat_img'] = img
                     else:
                         st.warning("Orbit Offline (Night). Using Backup.")
@@ -138,7 +148,7 @@ with tab1:
         st.metric("Pressure", f"{w['pressure']} hPa")
         st.info(f"**Status:** {'✅ SEEDABLE' if w['humidity'] > 40 else '⚠️ TOO DRY'}")
 
-    # 3. RADAR DATA (OPENWEATHERMAP TILES)
+    # 3. RADAR DATA
     with col_rad:
         st.subheader("C. Global Precipitation")
         radar_mode = st.radio("Radar Mode:", ["Interactive Map (OpenWeather)", "Scientific Scan (Static)"])
@@ -147,7 +157,7 @@ with tab1:
             if not weather_key:
                 st.error("⚠️ Enter OpenWeatherMap Key in Sidebar!")
             else:
-                # This HTML embeds a Leaflet Map using YOUR API Key for tiles
+                # HTML Map with doubled braces {{ }} for JS
                 html_map = f"""
                 <!DOCTYPE html>
                 <html>
@@ -171,32 +181,20 @@ with tab1:
                 </html>
                 """
                 components.html(html_map, height=300)
-                st.caption(f"Live Radar @ {lat:.2f}, {lon:.2f}")
+                st.caption(f"Live Radar over {target_name}")
         else:
+            # Static Backup for AI Analysis
             radar_url = "https://upload.wikimedia.org/wikipedia/commons/thumb/b/b7/Radar_reflectivity.jpg/600px-Radar_reflectivity.jpg"
             st.session_state['rad_img'] = load_image_from_url(radar_url)
             if st.session_state['rad_img']:
                 st.image(st.session_state['rad_img'], caption="NASA GPM IMERG (Gemini Readable)", use_column_width=True)
 
 # TAB 2: AI ANALYSIS
-# TAB 2: AI ANALYSIS
 with tab2:
     st.header("2. Gemini Fusion Engine")
-    st.caption("Processing on **Google Cloud Vertex AI** Infrastructure")
+    st.write("The AI analyzes **Satellite Texture** + **Radar Reflectivity** + **Humidity**.")
     
-    col_a, col_b = st.columns([2, 1])
-    with col_a:
-        st.write("The AI performs a **pixel-level analysis** of Satellite texture and Radar reflectivity, cross-referencing with atmospheric thermodynamics.")
-    with col_b:
-        # GOOGLE CLOUD "DATA PIPELINE" SIMULATION
-        if st.button("☁️ COMMIT DATA TO BIGQUERY"):
-            with st.spinner("Uploading telemetry to gs://visionrain-datalake/raw..."):
-                time.sleep(1.5)
-            st.toast("✅ Data saved to Google BigQuery!", icon="☁️")
-
-    st.divider()
-    
-    if st.button("RUN DEEP DIAGNOSTICS", type="primary"):
+    if st.button("RUN DIAGNOSTICS"):
         if not api_key:
             st.error("🔑 API Key Missing!")
         elif 'sat_img' not in st.session_state:
@@ -204,7 +202,7 @@ with tab2:
         else:
             genai.configure(api_key=api_key)
             try:
-                model = genai.GenerativeModel('gemini-2.5-flash')
+                model = genai.GenerativeModel('gemini-2.0-flash')
             except:
                 model = genai.GenerativeModel('gemini-1.5-flash')
             
@@ -219,7 +217,7 @@ with tab2:
             
             --- INPUT DATA STREAMS ---
             1. VISUAL SATELLITE (Image 1): Visible Spectrum (VIIRS). Look for cloud texture (lumpy = convective).
-            2. RADAR REFLECTIVITY (Image 2): Precipitation Intensity. (Red/Yellow = Heavy, Green/Blue = Light).
+            2. RADAR REFLECTIVITY (Image 2): Precipitation Intensity (Red/Yellow = Heavy, Blue = Light).
             3. TELEMETRY SENSORS:
                - Humidity: {w['humidity']}% (Threshold > 40%)
                - Temperature: {w['temp']}°C
@@ -248,24 +246,22 @@ with tab2:
             Output Format: Structured Markdown.
             """
             
+            # PREPARE INPUTS (SAT + RADAR)
             inputs = [prompt, st.session_state['sat_img']]
             if 'rad_img' in st.session_state and st.session_state['rad_img']:
                 inputs.append(st.session_state['rad_img'])
+                st.success("✅ Radar Data Injected into Model")
             
             with st.spinner("Gemini is analyzing Cloud Microphysics & Radar Cross-Sections..."):
                 try:
                     res = model.generate_content(inputs)
-                    
-                    # Display the result in a nice box
                     st.markdown("### 🛰️ AI Mission Report")
                     st.write(res.text)
                     
-                    # Visual Feedback based on decision
                     if "GO" in res.text.upper() and "NO-GO" not in res.text.upper():
                         st.success("✅ MISSION APPROVED: Launching Drone Swarm Protocols.")
                         st.balloons()
-                    else:
+                    elif "NO-GO" in res.text.upper():
                         st.error("⛔ MISSION ABORTED: Atmospheric Conditions Unsuitable.")
-                        
                 except Exception as e:
                     st.error(f"AI Error: {e}")
