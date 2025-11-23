@@ -169,13 +169,14 @@ with tab1:
                 st.image(st.session_state['rad_img'], caption="NASA GPM IMERG (Gemini Readable)", use_column_width=True)
 
 # TAB 2: AI ANALYSIS
+# TAB 2: AI ANALYSIS
 with tab2:
     st.header("2. Gemini Fusion Engine")
     st.caption("Processing on **Google Cloud Vertex AI** Infrastructure")
     
     col_a, col_b = st.columns([2, 1])
     with col_a:
-        st.write("The AI analyzes **Satellite Texture** + **Radar Reflectivity** + **Humidity**.")
+        st.write("The AI performs a **pixel-level analysis** of Satellite texture and Radar reflectivity, cross-referencing with atmospheric thermodynamics.")
     with col_b:
         # GOOGLE CLOUD "DATA PIPELINE" SIMULATION
         if st.button("☁️ COMMIT DATA TO BIGQUERY"):
@@ -185,7 +186,7 @@ with tab2:
 
     st.divider()
     
-    if st.button("RUN DIAGNOSTICS", type="primary"):
+    if st.button("RUN DEEP DIAGNOSTICS", type="primary"):
         if not api_key:
             st.error("🔑 API Key Missing!")
         elif 'sat_img' not in st.session_state:
@@ -193,33 +194,68 @@ with tab2:
         else:
             genai.configure(api_key=api_key)
             try:
-                model = genai.GenerativeModel('gemini-2.0-flash')
+                model = genai.GenerativeModel('gemini-2.5-flash')
             except:
                 model = genai.GenerativeModel('gemini-1.5-flash')
             
+            # --- THE SUPER PROMPT ---
             prompt = f"""
-            You are an AI Meteorologist. Analyze these TWO inputs for region: {target_name} ({lat}, {lon}).
+            ACT AS A LEAD ATMOSPHERIC SCIENTIST for the Saudi Rain Enhancement Program.
+            Your task is to analyze multi-modal sensor data to authorize a Cloud Seeding Mission.
             
-            1. VISUAL SATELLITE (Image 1): Look for convective towers.
-            2. RADAR REFLECTIVITY (Image 2): Look for Red/Yellow zones.
-            3. TELEMETRY: Humidity is {w['humidity']}%.
+            --- MISSION CONTEXT ---
+            Target Region: {target_name} (Lat: {lat}, Lon: {lon})
+            Objective: Enhance precipitation via Hygroscopic Seeding (Salt Flares).
             
-            DECISION: Is this cloud system suitable for Seeding?
-            FORMAT: JSON {{Decision: GO/NO-GO, Confidence: %, Reasoning: text}}
+            --- INPUT DATA STREAMS ---
+            1. VISUAL SATELLITE (Image 1): Visible Spectrum (VIIRS). Look for cloud texture (lumpy = convective).
+            2. RADAR REFLECTIVITY (Image 2): Precipitation Intensity. (Red/Yellow = Heavy, Green/Blue = Light).
+            3. TELEMETRY SENSORS:
+               - Humidity: {w['humidity']}% (Threshold > 40%)
+               - Temperature: {w['temp']}°C
+               - Pressure: {w['pressure']} hPa
+            
+            --- ANALYSIS PROTOCOL (Step-by-Step) ---
+            
+            STEP 1: VISUAL OBSERVATION
+            Describe exactly what you see in the Satellite Image. 
+            - Are the clouds flat/hazy (Stratiform) or tall/lumpy (Convective)?
+            - distinct features: Anvils, Overshooting tops, or clear skies?
+            
+            STEP 2: RADAR CORRELATION
+            Describe the Radar Image. 
+            - Do you see organized storm cells? 
+            - What is the max reflectivity color?
+            
+            STEP 3: THERMODYNAMIC VALIDATION
+            Does the Humidity ({w['humidity']}%) support droplet growth?
+            
+            STEP 4: OPERATIONAL DECISION
+            - STATUS: [GO / NO-GO]
+            - CONFIDENCE: [0-100%]
+            - ACTION: Recommend specific seeding agent (Hygroscopic vs Glaciogenic).
+            
+            Output Format: Structured Markdown.
             """
             
             inputs = [prompt, st.session_state['sat_img']]
             if 'rad_img' in st.session_state and st.session_state['rad_img']:
                 inputs.append(st.session_state['rad_img'])
-                st.success("✅ Radar Data Injected into Model")
             
-            with st.spinner("Fusion Engine Processing..."):
+            with st.spinner("Gemini is analyzing Cloud Microphysics & Radar Cross-Sections..."):
                 try:
                     res = model.generate_content(inputs)
-                    st.markdown("### 🤖 AI Assessment")
+                    
+                    # Display the result in a nice box
+                    st.markdown("### 🛰️ AI Mission Report")
                     st.write(res.text)
-                    if "GO" in res.text.upper():
-                        st.success("Conditions Optimal.")
+                    
+                    # Visual Feedback based on decision
+                    if "GO" in res.text.upper() and "NO-GO" not in res.text.upper():
+                        st.success("✅ MISSION APPROVED: Launching Drone Swarm Protocols.")
                         st.balloons()
+                    else:
+                        st.error("⛔ MISSION ABORTED: Atmospheric Conditions Unsuitable.")
+                        
                 except Exception as e:
                     st.error(f"AI Error: {e}")
