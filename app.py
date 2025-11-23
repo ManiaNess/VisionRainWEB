@@ -14,7 +14,7 @@ import math
 DEFAULT_API_KEY = "AIzaSyAZsUnki7M2SJjPYfZ5NHJ8LX3xMtboUDU" 
 WEATHER_API_KEY = "11b260a4212d29eaccbd9754da459059" 
 
-st.set_page_config(page_title="VisionRain Scientific Core", layout="wide", page_icon="🛰️")
+st.set_page_config(page_title="VisionRain Scientific Core", layout="wide", page_icon="⛈️")
 
 # --- STYLING ---
 st.markdown("""
@@ -148,7 +148,7 @@ with st.sidebar:
 st.title("VisionRain Scientific Core")
 st.markdown(f"### *Sector Analysis: {target_name}*")
 
-tab1, tab2 = st.tabs(["📡 NASA Multi-Spectral Array", "🧠 Gemini Fusion Core"])
+tab1, tab2 = st.tabs(["📡 NASA Sensor Array (Visuals)", "🧠 Gemini Fusion Core"])
 
 # TAB 1: NASA LAYERS
 with tab1:
@@ -157,7 +157,6 @@ with tab1:
     col_img, col_data = st.columns([2, 1])
     
     with col_img:
-        # Dynamic Layer Selector
         layer_opt = st.selectbox("Select Instrument Layer:", 
             ["1. Visible (Geostationary)", "2. Thermal (Land Surface Temp)", "3. Moisture (Water Vapor)", "4. Night Vision"])
         
@@ -256,14 +255,15 @@ with tab2:
             if st.session_state.get('ai_rad'): inputs.append(st.session_state['ai_rad'])
             
             with st.spinner("Gemini is thinking..."):
-                res = model.generate_content(inputs)
-                st.markdown("### 🛰️ Mission Report")
-                st.write(res.text)
-                if "GO" in res.text.upper() and "NO-GO" not in res.text.upper():
-                    st.success("✅ MISSION APPROVED")
-                    st.balloons()
-                elif "NO-GO" in res.text.upper():
-                    st.error("⛔ MISSION ABORTED")
-
-            except Exception as e:
-                st.error(f"AI Error: {e}")
+                # --- FIX IS HERE: ADDED TRY/EXCEPT ---
+                try:
+                    res = model.generate_content(inputs)
+                    st.markdown("### 🛰️ Mission Report")
+                    st.write(res.text)
+                    if "GO" in res.text.upper() and "NO-GO" not in res.text.upper():
+                        st.success("✅ MISSION APPROVED")
+                        st.balloons()
+                    elif "NO-GO" in res.text.upper():
+                        st.error("⛔ MISSION ABORTED")
+                except Exception as e:
+                    st.error(f"AI Error: {e}")
