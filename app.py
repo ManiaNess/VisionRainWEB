@@ -36,27 +36,21 @@ def load_image_from_url(url):
 
 # --- 2. SMART NASA LAYER FETCHER ---
 def get_nasa_layer(layer_type, lat, lon):
-    """
-    Fetches specific scientific layers from NASA GIBS based on location.
-    """
+    """Fetches specific scientific layers from NASA GIBS"""
     today = datetime.datetime.utcnow().strftime("%Y-%m-%d")
-    bbox = f"{lon-10},{lat-10},{lon+10},{lat+10}" # Wide view for context
+    bbox = f"{lon-10},{lat-10},{lon+10},{lat+10}" 
     
-    # SELECT SATELLITE BASED ON LONGITUDE (Rough Approximation)
-    # GOES-West: Americas | Meteosat: Europe/Africa/MidEast | Himawari: Asia
-    if -140 < lon < -30:
-        sat_source = "GOES-East_ABI_Band02_Red_Visible_1km" # Americas
-    elif -30 <= lon < 60:
-        sat_source = "Meteosat_MSG_SEVIRI_Band03_Visible" # Saudi/Europe/Africa
-    else:
-        sat_source = "Himawari_AHI_Band3_Red_Visible_1km" # Asia/Australia
+    # SELECT SATELLITE BASED ON LONGITUDE
+    if -140 < lon < -30: sat_source = "GOES-East_ABI_Band02_Red_Visible_1km"
+    elif -30 <= lon < 60: sat_source = "Meteosat_MSG_SEVIRI_Band03_Visible"
+    else: sat_source = "Himawari_AHI_Band3_Red_Visible_1km"
 
-    # DEFINE LAYERS
+    # LAYER DEFINITIONS
     layers = {
         "Visual": sat_source,
-        "Thermal": "MODIS_Terra_Land_Surface_Temperature_Day", # Heat Map
-        "Moisture": "AIRS_L3_Total_Precipitable_Water_Liquid_A_Day", # Hidden Water
-        "Night": "VIIRS_SNPP_DayNightBand_At_Sensor_Radiance", # Night Vision
+        "Thermal": "MODIS_Terra_Land_Surface_Temperature_Day", 
+        "Moisture": "AIRS_L3_Total_Precipitable_Water_Liquid_A_Day", 
+        "Night": "VIIRS_SNPP_DayNightBand_At_Sensor_Radiance",
     }
     
     selected_layer = layers.get(layer_type, sat_source)
@@ -71,7 +65,8 @@ def get_nasa_layer(layer_type, lat, lon):
     
     try:
         full_url = requests.Request('GET', url, params=params).prepare().url
-        return load_image_from_url(full_url), selected_layer
+        img = load_image_from_url(full_url)
+        return img, selected_layer
     except: return None, "Error"
 
 # --- 3. OWM RADAR TILE ---
@@ -160,27 +155,37 @@ with tab1:
         layer_opt = st.selectbox("Select Instrument Layer:", 
             ["1. Visible (Geostationary)", "2. Thermal (Land Surface Temp)", "3. Moisture (Water Vapor)", "4. Night Vision"])
         
+        # --- FIX: CHECK IF IMAGE EXISTS BEFORE DISPLAYING ---
         if "1. Visible" in layer_opt:
             img, src = get_nasa_layer("Visual", lat, lon)
             if img: 
-                st.image(img, caption=f"Real-Time Source: {src}", use_column_width=True)
+                st.image(img, caption=f"Source: {src}", use_column_width=True)
                 st.session_state['ai_vis'] = img
             else:
-                st.warning("Visual Band Offline (Night). Switching to Thermal.")
+                st.warning("Visible Band Unavailable (Night/Cloud). Using Night Mode recommended.")
                 
         elif "2. Thermal" in layer_opt:
             img, src = get_nasa_layer("Thermal", lat, lon)
-            st.image(img, caption=f"MODIS Land Surface Temperature ({src})", use_column_width=True)
-            st.session_state['ai_therm'] = img
+            if img:
+                st.image(img, caption=f"Thermal Map ({src})", use_column_width=True)
+                st.session_state['ai_therm'] = img
+            else:
+                st.warning("Thermal Data Unavailable for this region/time.")
 
         elif "3. Moisture" in layer_opt:
             img, src = get_nasa_layer("Moisture", lat, lon)
-            st.image(img, caption=f"AIRS Total Precipitable Water ({src})", use_column_width=True)
-            st.session_state['ai_moist'] = img
+            if img:
+                st.image(img, caption=f"Water Vapor ({src})", use_column_width=True)
+                st.session_state['ai_moist'] = img
+            else:
+                st.warning("Moisture Data Processing...")
             
         elif "4. Night" in layer_opt:
             img, src = get_nasa_layer("Night", lat, lon)
-            st.image(img, caption=f"VIIRS Day/Night Band ({src})", use_column_width=True)
+            if img:
+                st.image(img, caption=f"Night Vision ({src})", use_column_width=True)
+            else:
+                st.warning("Night Band Unavailable.")
 
     with col_data:
         st.subheader("Telemetry")
@@ -204,24 +209,24 @@ with tab1:
 # TAB 2: GEMINI AI
 with tab2:
     st.header("2. Gemini Fusion Engine")
-    st.write("Gemini analyzes **3 Satellite Bands** + **Radar** + **Telemetry** simultaneously.")
     
     if st.button("RUN DIAGNOSTICS", type="primary"):
         if not api_key:
             st.error("🔑 API Key Missing!")
         else:
-            # Ensure we have at least one image
+            # Ensure we have at least one image to analyze
             if 'ai_vis' not in st.session_state:
                 st.session_state['ai_vis'], _ = get_nasa_layer("Visual", lat, lon)
             
-            # Show Payload
+            # Display Payload
             st.markdown("### 👁️ AI Input Stream")
             c1, c2, c3 = st.columns(3)
-            if st.session_state.get('ai_vis'): c1.image(st.session_state['ai_vis'], caption="Visible", use_column_width=True)
+            
+            # Only display if image exists
+            if st.session_state.get('ai_vis'): c1.image(st.session_state['ai_vis'], caption="Visual", use_column_width=True)
             if st.session_state.get('ai_therm'): c2.image(st.session_state['ai_therm'], caption="Thermal", use_column_width=True)
             if st.session_state.get('ai_rad'): c3.image(st.session_state['ai_rad'], caption="Radar", use_column_width=True)
             
-            # Run AI
             genai.configure(api_key=api_key)
             try:
                 model = genai.GenerativeModel('gemini-2.0-flash')
@@ -229,41 +234,29 @@ with tab2:
                 model = genai.GenerativeModel('gemini-1.5-flash')
             
             prompt = f"""
-            ACT AS A LEAD METEOROLOGIST. Analyze this Multi-Spectral Sensor Data for Cloud Seeding.
+            ACT AS A LEAD METEOROLOGIST. Analyze this Multi-Spectral Sensor Data.
             Location: {target_name} ({lat}, {lon})
             
             DATA:
             - Humidity: {w['main']['humidity'] if w else 'N/A'}%
-            - Pressure: {w['main']['pressure'] if w else 'N/A'} hPa
-            
-            VISUALS (Attached):
-            1. Visible Satellite (Cloud Texture)
-            2. Thermal Map (Surface Heat - Red=Hot, Blue=Cold)
-            3. Radar Map (Precipitation)
             
             TASK:
-            1. Analyze Cloud Morphology (Convective vs Stratiform).
-            2. Evaluate Thermal: Is the ground too hot (evaporation risk)?
-            3. Correlate with Radar.
-            4. DECISION: **GO** or **NO-GO**?
-            5. REASONING: Scientific justification.
+            1. Analyze Cloud Morphology.
+            2. Evaluate Thermal/Moisture data if present.
+            3. DECISION: **GO** or **NO-GO** for Cloud Seeding?
             """
             
+            # Safe Input Construction
             inputs = [prompt]
             if st.session_state.get('ai_vis'): inputs.append(st.session_state['ai_vis'])
             if st.session_state.get('ai_therm'): inputs.append(st.session_state['ai_therm'])
             if st.session_state.get('ai_rad'): inputs.append(st.session_state['ai_rad'])
             
             with st.spinner("Gemini is thinking..."):
-                # --- FIX IS HERE: ADDED TRY/EXCEPT ---
                 try:
                     res = model.generate_content(inputs)
                     st.markdown("### 🛰️ Mission Report")
                     st.write(res.text)
-                    if "GO" in res.text.upper() and "NO-GO" not in res.text.upper():
-                        st.success("✅ MISSION APPROVED")
-                        st.balloons()
-                    elif "NO-GO" in res.text.upper():
-                        st.error("⛔ MISSION ABORTED")
+                    if "GO" in res.text.upper(): st.balloons()
                 except Exception as e:
                     st.error(f"AI Error: {e}")
