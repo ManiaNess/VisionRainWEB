@@ -8,8 +8,8 @@ import os
 
 # --- CONFIGURATION ---
 # Leave empty for GitHub (User pastes in Sidebar for security)
-DEFAULT_API_KEY = "" 
-WEATHER_API_KEY = "" 
+DEFAULT_API_KEY = "AIzaSyA7Yk4WRdSu976U4EpHZN47m-KA8JbJ5do" 
+WEATHER_API_KEY = "11b260a4212d29eaccbd9754da459059" 
 
 st.set_page_config(page_title="VisionRain Data Core", layout="wide", page_icon="🛰️")
 
