@@ -137,7 +137,7 @@ if st.button("RUN MULTIMODAL DIAGNOSTICS", type="primary"):
     else:
         genai.configure(api_key=google_key)
         # Using 1.5 Flash because it handles multiple images extremely well
-        model = genai.GenerativeModel('gemini-1.5-flash')
+        model = genai.GenerativeModel('gemini-2.5-flash')
         
         prompt = f"""
         Act as a Senior Meteorologist. Analyze this Multi-Sensor Data Array.
