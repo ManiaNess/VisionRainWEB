@@ -30,7 +30,7 @@ def load_image_from_url(url):
         return Image.open(BytesIO(r.content))
     except: return None
 
-# --- 1. GEOCODING (City Search) ---
+# --- 1. GEOCODING (Find City Coords) ---
 def get_coordinates(city_name, api_key):
     if not api_key: return None, None
     try:
@@ -78,12 +78,14 @@ with st.sidebar:
     st.markdown("---")
     st.markdown("### 📍 Mission Target")
     
+    # --- SELECT LOCATION FEATURE ---
     target_name = st.text_input("Region Name", "Jeddah")
     
-    # Initialize defaults if needed
+    # Initialize Session State for Lat/Lon
     if 'lat' not in st.session_state: st.session_state['lat'] = 21.5433
     if 'lon' not in st.session_state: st.session_state['lon'] = 39.1728
 
+    # Find Button
     if st.button("Find Location"):
         if weather_key:
             new_lat, new_lon = get_coordinates(target_name, weather_key)
@@ -96,6 +98,7 @@ with st.sidebar:
         else:
             st.warning("Need Weather Key to search!")
 
+    # Editable Inputs
     col1, col2 = st.columns(2)
     with col1: 
         lat = st.number_input("Latitude", value=st.session_state['lat'], format="%.4f")
@@ -148,7 +151,7 @@ with tab1:
         st.metric("Pressure", f"{w['pressure']} hPa")
         st.info(f"**Status:** {'✅ SEEDABLE' if w['humidity'] > 40 else '⚠️ TOO DRY'}")
 
-    # 3. RADAR DATA
+    # 3. RADAR DATA (OPENWEATHERMAP TILES)
     with col_rad:
         st.subheader("C. Global Precipitation")
         radar_mode = st.radio("Radar Mode:", ["Interactive Map (OpenWeather)", "Scientific Scan (Static)"])
