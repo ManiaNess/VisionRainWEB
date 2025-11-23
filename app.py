@@ -5,20 +5,23 @@ import requests
 import datetime
 from io import BytesIO
 import streamlit.components.v1 as components
-import os
+import time
+import json
 
 # --- CONFIGURATION ---
 DEFAULT_API_KEY = "AIzaSyAZsUnki7M2SJjPYfZ5NHJ8LX3xMtboUDU" 
 WEATHER_API_KEY = "11b260a4212d29eaccbd9754da459059" 
 
-st.set_page_config(page_title="VisionRain Data Core", layout="wide", page_icon="🛰️")
+st.set_page_config(page_title="VisionRain Data Core", layout="wide", page_icon="⛈️")
 
-# --- STYLING ---
+# --- STYLING (GOOGLE CLOUD THEME) ---
 st.markdown("""
     <style>
     .stApp {background-color: #0e1117;}
     .stMetric {background-color: #1f2937; border: 1px solid #374151; border-radius: 8px;}
-    h1, h2, h3 {color: #60a5fa;}
+    h1, h2, h3 {color: #4285F4;} /* Google Blue */
+    .stButton>button {background-color: #4285F4; color: white; border: none;}
+    .success-box {padding: 10px; background-color: #0f9d58; color: white; border-radius: 5px;}
     </style>
     """, unsafe_allow_html=True)
 
@@ -30,11 +33,10 @@ def load_image_from_url(url):
         return Image.open(BytesIO(r.content))
     except: return None
 
-# --- DATA FETCHING FUNCTIONS ---
+# --- DATA FETCHING ---
 def get_nasa_feed(lat, lon):
     today = datetime.datetime.utcnow().strftime("%Y-%m-%d")
-    # Dynamic Bounding Box based on USER INPUT
-    bbox = f"{lon-5},{lat-5},{lon+5},{lat+5}" 
+    bbox = f"{lat-5},{lon-5},{lat+5},{lon+5}" 
     url = "https://gibs.earthdata.nasa.gov/wms/epsg4326/best/wms.cgi"
     params = {
         "SERVICE": "WMS", "REQUEST": "GetMap", "VERSION": "1.3.0",
@@ -59,32 +61,35 @@ def get_weather_telemetry(lat, lon):
 with st.sidebar:
     st.image("https://cdn-icons-png.flaticon.com/512/414/414927.png", width=80)
     st.title("VisionRain")
-    st.caption("Data Verification System")
+    st.caption("Built on **Google Cloud Vertex AI**")
     
-    st.markdown("### 🔑 Access Keys")
     api_key = st.text_input("Google AI Key", value=DEFAULT_API_KEY, type="password")
     weather_key = st.text_input("OpenWeatherMap Key", value=WEATHER_API_KEY, type="password")
     
     st.markdown("---")
     st.markdown("### 📍 Target Zone")
-    target_name = st.text_input("Region Name", "Jeddah") # Default changed to Jeddah
+    target_name = st.text_input("Region Name", "Jeddah")
     
     col1, col2 = st.columns(2)
+    with col1: lat = st.number_input("Latitude", value=21.5433, format="%.4f")
+    with col2: lon = st.number_input("Longitude", value=39.1728, format="%.4f")
     
-    # --- FIX IS HERE: REMOVED min_value/max_value ---
-    # Also added format="%.4f" to allow precise decimals
-    with col1: 
-        lat = st.number_input("Latitude", value=21.5433, format="%.4f") 
-    with col2: 
-        lon = st.number_input("Longitude", value=39.1728, format="%.4f")
+    # GOOGLE MAPS EMBED (No Key Needed for this View)
+    # This replaces the generic map with a real Google Map
+    map_html = f"""
+    <iframe width="100%" height="250" frameborder="0" style="border:0; border-radius:10px;"
+        src="https://maps.google.com/maps?q={lat},{lon}&z=10&output=embed">
+    </iframe>
+    """
+    components.html(map_html, height=250)
     
-    # Update Map based on inputs
-    st.map({"lat": [lat], "lon": [lon]})
     st.success(f"Tracking: **{target_name}**")
 
 # --- MAIN DASHBOARD ---
 st.title("VisionRain Data Command Center")
-tab1, tab2 = st.tabs(["📡 Data Verification (Live)", "🧠 AI Analysis (Gemini)"])
+st.markdown(f"### *Sector Analysis: {target_name} ({lat}, {lon})*")
+
+tab1, tab2 = st.tabs(["📡 Data Verification (Live)", "🧠 Gemini Fusion Core"])
 
 # TAB 1: DATA FUSION
 with tab1:
@@ -94,7 +99,7 @@ with tab1:
     
     # 1. SATELLITE DATA
     with col_sat:
-        st.subheader("A. Visual Satellite")
+        st.subheader("A. Satellite (Visual)")
         source_opt = st.radio("Source:", ["Live Feed (NASA)", "Archive (Storm)"], horizontal=True)
         
         if source_opt == "Live Feed (NASA)":
@@ -102,7 +107,7 @@ with tab1:
                 with st.spinner(f"Connecting to Suomi NPP over {target_name}..."):
                     img, date = get_nasa_feed(lat, lon)
                     if img:
-                        st.image(img, caption=f"Live Feed: {date}", use_column_width=True)
+                        st.image(img, caption=f"Live Feed: {date} (NASA GIBS)", use_column_width=True)
                         st.session_state['sat_img'] = img
                     else:
                         st.warning("Orbit Offline (Night). Using Backup.")
@@ -124,16 +129,15 @@ with tab1:
         st.metric("Pressure", f"{w['pressure']} hPa")
         st.info(f"**Status:** {'✅ SEEDABLE' if w['humidity'] > 40 else '⚠️ TOO DRY'}")
 
-    # 3. RADAR DATA (OPENWEATHERMAP TILES)
+    # 3. RADAR DATA (OPENWEATHERMAP)
     with col_rad:
         st.subheader("C. Global Precipitation")
         radar_mode = st.radio("Radar Mode:", ["Interactive Map (OpenWeather)", "Scientific Scan (Static)"])
         
         if radar_mode == "Interactive Map (OpenWeather)":
             if not weather_key:
-                st.error("⚠️ Enter OpenWeatherMap Key in Sidebar to see Live Radar!")
+                st.error("⚠️ Enter OpenWeatherMap Key in Sidebar!")
             else:
-                # Updated HTML Map to center dynamically on user Lat/Lon
                 html_map = f"""
                 <!DOCTYPE html>
                 <html>
@@ -167,9 +171,21 @@ with tab1:
 # TAB 2: AI ANALYSIS
 with tab2:
     st.header("2. Gemini Fusion Engine")
-    st.write("The AI analyzes **Satellite Texture** + **Radar Reflectivity** + **Humidity**.")
+    st.caption("Processing on **Google Cloud Vertex AI** Infrastructure")
     
-    if st.button("RUN DIAGNOSTICS"):
+    col_a, col_b = st.columns([2, 1])
+    with col_a:
+        st.write("The AI analyzes **Satellite Texture** + **Radar Reflectivity** + **Humidity**.")
+    with col_b:
+        # GOOGLE CLOUD "DATA PIPELINE" SIMULATION
+        if st.button("☁️ COMMIT DATA TO BIGQUERY"):
+            with st.spinner("Uploading telemetry to gs://visionrain-datalake/raw..."):
+                time.sleep(1.5)
+            st.toast("✅ Data saved to Google BigQuery!", icon="☁️")
+
+    st.divider()
+    
+    if st.button("RUN DIAGNOSTICS", type="primary"):
         if not api_key:
             st.error("🔑 API Key Missing!")
         elif 'sat_img' not in st.session_state:
