@@ -5,13 +5,12 @@ import requests
 import datetime
 from io import BytesIO
 import streamlit.components.v1 as components
-import os
 
 # --- CONFIGURATION ---
 DEFAULT_API_KEY = "AIzaSyA7Yk4WRdSu976U4EpHZN47m-KA8JbJ5do" 
 WEATHER_API_KEY = "11b260a4212d29eaccbd9754da459059" 
 
-st.set_page_config(page_title="VisionRain Data Core", layout="wide", page_icon="🛰️")
+st.set_page_config(page_title="VisionRain Data Core", layout="wide", page_icon="⛈️")
 
 # --- STYLING ---
 st.markdown("""
@@ -22,7 +21,19 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# --- FETCHING ---
+# --- ROBUST IMAGE LOADER (THE FIX) ---
+def load_image_from_url(url):
+    """Fetches an image safely with headers to prevent 403/404 errors"""
+    try:
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
+        response = requests.get(url, headers=headers, timeout=5)
+        response.raise_for_status() # Check for HTTP errors
+        return Image.open(BytesIO(response.content))
+    except Exception as e:
+        st.error(f"Image Load Error: {e}")
+        return None
+
+# --- DATA FETCHING FUNCTIONS ---
 def get_nasa_feed(lat, lon):
     today = datetime.datetime.utcnow().strftime("%Y-%m-%d")
     bbox = f"{lat-5},{lon-5},{lat+5},{lon+5}" 
@@ -34,8 +45,9 @@ def get_nasa_feed(lat, lon):
         "BBOX": bbox, "WIDTH": "800", "HEIGHT": "800", "TIME": today
     }
     try:
-        r = requests.get(url, params=params, timeout=5)
-        if r.status_code == 200: return Image.open(BytesIO(r.content)), today
+        # We construct the URL manually to pass to our robust loader
+        full_url = requests.Request('GET', url, params=params).prepare().url
+        return load_image_from_url(full_url), today
     except: return None, None
 
 def get_weather_telemetry(lat, lon):
@@ -85,16 +97,15 @@ with tab1:
                         st.image(img, caption=f"Live Feed: {date}", use_column_width=True)
                         st.session_state['sat_img'] = img
                     else:
-                        st.warning("Orbit Offline (Night). Using Archive.")
-                        # Use Direct URL if local file missing
+                        st.warning("Orbit Offline. Using Backup.")
                         url = "https://upload.wikimedia.org/wikipedia/commons/thumb/5/5e/Cumulonimbus_cloud_over_Singapore.jpg/800px-Cumulonimbus_cloud_over_Singapore.jpg"
-                        st.session_state['sat_img'] = Image.open(BytesIO(requests.get(url).content))
+                        st.session_state['sat_img'] = load_image_from_url(url)
                         st.image(st.session_state['sat_img'], caption="Backup: Archive Storm")
         else:
-            # Archive Load
             url = "https://upload.wikimedia.org/wikipedia/commons/thumb/5/5e/Cumulonimbus_cloud_over_Singapore.jpg/800px-Cumulonimbus_cloud_over_Singapore.jpg"
-            st.session_state['sat_img'] = Image.open(BytesIO(requests.get(url).content))
-            st.image(st.session_state['sat_img'], caption="Archive: Convective System", use_column_width=True)
+            st.session_state['sat_img'] = load_image_from_url(url)
+            if st.session_state['sat_img']:
+                st.image(st.session_state['sat_img'], caption="Archive: Convective System", use_column_width=True)
 
     # 2. WEATHER DATA
     with col_weath:
@@ -105,7 +116,7 @@ with tab1:
         st.metric("Pressure", f"{w['pressure']} hPa")
         st.info(f"**Status:** {'✅ SEEDABLE' if w['humidity'] > 40 else '⚠️ TOO DRY'}")
 
-    # 3. RADAR DATA
+    # 3. RADAR DATA (FIXED)
     with col_rad:
         st.subheader("C. Radar (Precipitation)")
         radar_mode = st.radio("Radar Mode:", ["Scientific Scan (Static)", "Interactive Map"])
@@ -115,10 +126,14 @@ with tab1:
             components.html(html_code, height=300)
             st.caption("Note: Gemini CANNOT read this map.")
         else:
-            # STATIC IMAGE FOR AI ANALYSIS
+            # FIXED URL - Using a very reliable wikimedia source with headers
             radar_url = "https://upload.wikimedia.org/wikipedia/commons/thumb/b/b7/Radar_reflectivity.jpg/600px-Radar_reflectivity.jpg"
-            st.session_state['rad_img'] = Image.open(BytesIO(requests.get(radar_url).content))
-            st.image(st.session_state['rad_img'], caption="NASA GPM IMERG (Gemini Readable)", use_column_width=True)
+            
+            # Load safely using the new function
+            st.session_state['rad_img'] = load_image_from_url(radar_url)
+            
+            if st.session_state['rad_img']:
+                st.image(st.session_state['rad_img'], caption="NASA GPM IMERG (Gemini Readable)", use_column_width=True)
 
 # TAB 2: AI ANALYSIS
 with tab2:
@@ -137,22 +152,20 @@ with tab2:
             except:
                 model = genai.GenerativeModel('gemini-1.5-flash')
             
-            # --- MULTIMODAL PROMPT ---
             prompt = f"""
             You are an AI Meteorologist. Analyze these TWO inputs:
-            
-            1. VISUAL SATELLITE (Image 1): Look for convective towers (lumpy texture).
-            2. RADAR REFLECTIVITY (Image 2): Look for Red/Yellow zones (heavy rain) vs Blue (light rain).
+            1. VISUAL SATELLITE (Image 1): Look for convective towers.
+            2. RADAR REFLECTIVITY (Image 2): Look for Red/Yellow zones.
             3. TELEMETRY: Humidity is {w['humidity']}%.
-            
             DECISION: Is this cloud system suitable for Seeding?
             FORMAT: JSON {{Decision: GO/NO-GO, Confidence: %, Reasoning: text}}
             """
             
-            # CHECK IF WE HAVE RADAR IMAGE LOADED
             inputs = [prompt, st.session_state['sat_img']]
-            if 'rad_img' in st.session_state:
-                inputs.append(st.session_state['rad_img']) # ADD RADAR TO AI INPUT
+            
+            # Only add radar if it loaded correctly
+            if 'rad_img' in st.session_state and st.session_state['rad_img'] is not None:
+                inputs.append(st.session_state['rad_img'])
                 st.success("✅ Radar Data Injected into Model")
             
             with st.spinner("Fusion Engine Processing..."):
