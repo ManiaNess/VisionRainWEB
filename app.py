@@ -5,23 +5,22 @@ import requests
 import datetime
 from io import BytesIO
 import streamlit.components.v1 as components
-import time
-import json
+import folium
+from streamlit_folium import st_folium
 
 # --- CONFIGURATION ---
+# Leave empty for GitHub (User pastes in Sidebar for security)
 DEFAULT_API_KEY = "AIzaSyAZsUnki7M2SJjPYfZ5NHJ8LX3xMtboUDU" 
 WEATHER_API_KEY = "11b260a4212d29eaccbd9754da459059" 
 
-st.set_page_config(page_title="VisionRain Data Core", layout="wide", page_icon="⛈️")
+st.set_page_config(page_title="VisionRain Data Core", layout="wide", page_icon="🛰️")
 
-# --- STYLING (GOOGLE CLOUD THEME) ---
+# --- STYLING ---
 st.markdown("""
     <style>
     .stApp {background-color: #0e1117;}
     .stMetric {background-color: #1f2937; border: 1px solid #374151; border-radius: 8px;}
-    h1, h2, h3 {color: #4285F4;} /* Google Blue */
-    .stButton>button {background-color: #4285F4; color: white; border: none;}
-    .success-box {padding: 10px; background-color: #0f9d58; color: white; border-radius: 5px;}
+    h1, h2, h3 {color: #60a5fa;}
     </style>
     """, unsafe_allow_html=True)
 
@@ -36,7 +35,7 @@ def load_image_from_url(url):
 # --- DATA FETCHING ---
 def get_nasa_feed(lat, lon):
     today = datetime.datetime.utcnow().strftime("%Y-%m-%d")
-    bbox = f"{lat-5},{lon-5},{lat+5},{lon+5}" 
+    bbox = f"{lon-5},{lat-5},{lon+5},{lat+5}" 
     url = "https://gibs.earthdata.nasa.gov/wms/epsg4326/best/wms.cgi"
     params = {
         "SERVICE": "WMS", "REQUEST": "GetMap", "VERSION": "1.3.0",
@@ -57,39 +56,49 @@ def get_weather_telemetry(lat, lon):
         except: pass
     return {"humidity": 65, "temp": 32, "pressure": 1012} 
 
-# --- SIDEBAR ---
+# --- SIDEBAR: MISSION CONTROL ---
 with st.sidebar:
     st.image("https://cdn-icons-png.flaticon.com/512/414/414927.png", width=80)
     st.title("VisionRain")
-    st.caption("Built on **Google Cloud Vertex AI**")
+    st.caption("Data Verification System")
     
     api_key = st.text_input("Google AI Key", value=DEFAULT_API_KEY, type="password")
     weather_key = st.text_input("OpenWeatherMap Key", value=WEATHER_API_KEY, type="password")
     
     st.markdown("---")
-    st.markdown("### 📍 Target Zone")
-    target_name = st.text_input("Region Name", "Jeddah")
+    st.markdown("### 📍 Select Target on Map")
     
+    # --- INTERACTIVE MAP SELECTOR ---
+    # Default to Riyadh if no click yet
+    if 'lat' not in st.session_state: st.session_state['lat'] = 24.7136
+    if 'lon' not in st.session_state: st.session_state['lon'] = 46.6753
+
+    m = folium.Map(location=[st.session_state['lat'], st.session_state['lon']], zoom_start=5)
+    m.add_child(folium.LatLngPopup()) # Allows clicking to get coords
+    
+    # Render Map and capture click
+    map_data = st_folium(m, height=250, width=280)
+
+    # Update State if Clicked
+    if map_data['last_clicked']:
+        st.session_state['lat'] = map_data['last_clicked']['lat']
+        st.session_state['lon'] = map_data['last_clicked']['lng']
+        st.rerun() # Refresh app with new coords
+
+    # Display Current Coords
     col1, col2 = st.columns(2)
-    with col1: lat = st.number_input("Latitude", value=21.5433, format="%.4f")
-    with col2: lon = st.number_input("Longitude", value=39.1728, format="%.4f")
+    col1.metric("Lat", f"{st.session_state['lat']:.4f}")
+    col2.metric("Lon", f"{st.session_state['lon']:.4f}")
     
-    # GOOGLE MAPS EMBED (No Key Needed for this View)
-    # This replaces the generic map with a real Google Map
-    map_html = f"""
-    <iframe width="100%" height="250" frameborder="0" style="border:0; border-radius:10px;"
-        src="https://maps.google.com/maps?q={lat},{lon}&z=10&output=embed">
-    </iframe>
-    """
-    components.html(map_html, height=250)
-    
-    st.success(f"Tracking: **{target_name}**")
+    lat = st.session_state['lat']
+    lon = st.session_state['lon']
+    st.success("Target Locked")
 
 # --- MAIN DASHBOARD ---
 st.title("VisionRain Data Command Center")
-st.markdown(f"### *Sector Analysis: {target_name} ({lat}, {lon})*")
+st.markdown(f"### *Sector Analysis Coordinates: {lat:.4f}, {lon:.4f}*")
 
-tab1, tab2 = st.tabs(["📡 Data Verification (Live)", "🧠 Gemini Fusion Core"])
+tab1, tab2 = st.tabs(["📡 Data Verification (Live)", "🧠 AI Analysis (Gemini)"])
 
 # TAB 1: DATA FUSION
 with tab1:
@@ -99,15 +108,15 @@ with tab1:
     
     # 1. SATELLITE DATA
     with col_sat:
-        st.subheader("A. Satellite (Visual)")
+        st.subheader("A. Visual Satellite")
         source_opt = st.radio("Source:", ["Live Feed (NASA)", "Archive (Storm)"], horizontal=True)
         
         if source_opt == "Live Feed (NASA)":
             if st.button("📡 ACQUIRE LIVE SIGNAL"):
-                with st.spinner(f"Connecting to Suomi NPP over {target_name}..."):
+                with st.spinner(f"Re-orienting Satellite..."):
                     img, date = get_nasa_feed(lat, lon)
                     if img:
-                        st.image(img, caption=f"Live Feed: {date} (NASA GIBS)", use_column_width=True)
+                        st.image(img, caption=f"Live Feed: {date} | VIIRS/Suomi NPP", use_column_width=True)
                         st.session_state['sat_img'] = img
                     else:
                         st.warning("Orbit Offline (Night). Using Backup.")
@@ -129,7 +138,7 @@ with tab1:
         st.metric("Pressure", f"{w['pressure']} hPa")
         st.info(f"**Status:** {'✅ SEEDABLE' if w['humidity'] > 40 else '⚠️ TOO DRY'}")
 
-    # 3. RADAR DATA (OPENWEATHERMAP)
+    # 3. RADAR DATA (OPENWEATHERMAP TILES)
     with col_rad:
         st.subheader("C. Global Precipitation")
         radar_mode = st.radio("Radar Mode:", ["Interactive Map (OpenWeather)", "Scientific Scan (Static)"])
@@ -138,6 +147,7 @@ with tab1:
             if not weather_key:
                 st.error("⚠️ Enter OpenWeatherMap Key in Sidebar!")
             else:
+                # This HTML embeds a Leaflet Map using YOUR API Key for tiles
                 html_map = f"""
                 <!DOCTYPE html>
                 <html>
@@ -161,7 +171,7 @@ with tab1:
                 </html>
                 """
                 components.html(html_map, height=300)
-                st.caption(f"Live Radar over {target_name}")
+                st.caption(f"Live Radar @ {lat:.2f}, {lon:.2f}")
         else:
             radar_url = "https://upload.wikimedia.org/wikipedia/commons/thumb/b/b7/Radar_reflectivity.jpg/600px-Radar_reflectivity.jpg"
             st.session_state['rad_img'] = load_image_from_url(radar_url)
