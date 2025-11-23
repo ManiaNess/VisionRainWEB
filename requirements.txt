@@ -4,3 +4,4 @@ pillow
 requests
 folium
 streamlit-folium
+pandas
