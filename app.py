@@ -9,6 +9,7 @@ import folium
 from streamlit_folium import st_folium
 
 # --- CONFIGURATION ---
+# Leave empty for GitHub (User pastes in Sidebar for security)
 DEFAULT_API_KEY = "AIzaSyAZsUnki7M2SJjPYfZ5NHJ8LX3xMtboUDU" 
 WEATHER_API_KEY = "11b260a4212d29eaccbd9754da459059" 
 
@@ -28,10 +29,12 @@ def load_image_from_url(url):
     try:
         headers = {'User-Agent': 'Mozilla/5.0'}
         r = requests.get(url, headers=headers, timeout=5)
-        return Image.open(BytesIO(r.content))
-    except: return None
+        if r.status_code == 200:
+            return Image.open(BytesIO(r.content))
+    except: pass
+    return None
 
-# --- 1. NASA SATELLITE (For AI Analysis) ---
+# --- 1. NASA SATELLITE FETCHER (With Fallback) ---
 def get_nasa_feed(lat, lon):
     today = datetime.datetime.utcnow().strftime("%Y-%m-%d")
     bbox = f"{lon-5},{lat-5},{lon+5},{lat+5}" 
@@ -44,8 +47,13 @@ def get_nasa_feed(lat, lon):
     }
     try:
         full_url = requests.Request('GET', url, params=params).prepare().url
-        return load_image_from_url(full_url), today
-    except: return None, None
+        img = load_image_from_url(full_url)
+        if img: return img, "Live Feed (NASA VIIRS)"
+    except: pass
+    
+    # FALLBACK IF NASA FAILS
+    backup_url = "https://upload.wikimedia.org/wikipedia/commons/thumb/5/5e/Cumulonimbus_cloud_over_Singapore.jpg/800px-Cumulonimbus_cloud_over_Singapore.jpg"
+    return load_image_from_url(backup_url), "Archive Backup (Night/Offline)"
 
 # --- 2. WEATHER TELEMETRY ---
 def get_weather_telemetry(lat, lon):
@@ -70,22 +78,18 @@ with st.sidebar:
     st.caption("Click map to update coordinates")
 
     # --- INTERACTIVE MAP PICKER (FOLIUM) ---
-    # Initialize State
     if 'lat' not in st.session_state: st.session_state['lat'] = 21.5433
     if 'lon' not in st.session_state: st.session_state['lon'] = 39.1728
 
-    # Create Map centered on current selection
     m = folium.Map(location=[st.session_state['lat'], st.session_state['lon']], zoom_start=5)
-    m.add_child(folium.LatLngPopup()) # Enable clicking
+    m.add_child(folium.LatLngPopup()) 
     
-    # Render Map
     map_data = st_folium(m, height=250, width=280)
 
-    # Update if user clicked
     if map_data['last_clicked']:
         st.session_state['lat'] = map_data['last_clicked']['lat']
         st.session_state['lon'] = map_data['last_clicked']['lng']
-        st.rerun() # Refresh the app instantly
+        st.rerun()
 
     # Display Coordinates
     c1, c2 = st.columns(2)
@@ -109,10 +113,9 @@ with tab1:
     
     col_visual, col_data = st.columns([2, 1])
     
-    # LEFT: WINDY.COM EMBED (THE COOL VISUALS)
+    # LEFT: WINDY.COM EMBED
     with col_visual:
         st.subheader("A. Atmospheric Dynamics (Windy.com)")
-        # Embed Windy centered on the sidebar coordinates
         windy_url = f"https://embed.windy.com/embed2.html?lat={lat}&lon={lon}&detailLat={lat}&detailLon={lon}&width=800&height=500&zoom=6&level=surface&overlay=rain&product=ecmwf&menu=&message=&marker=&calendar=now&pressure=&type=map&location=coordinates&detail=&metricWind=default&metricTemp=default&radarRange=-1"
         components.iframe(windy_url, height=500)
         st.caption(f"Live Radar & Wind @ {lat:.2f}, {lon:.2f}")
@@ -148,24 +151,15 @@ with tab2:
         if not api_key:
             st.error("🔑 API Key Missing!")
         else:
-            # 1. FETCH HIDDEN ASSETS FOR AI (Because AI can't see Windy)
+            # 1. FETCH ASSETS FOR AI
             with st.spinner("Acquiring NASA Optical Downlink for Analysis..."):
-                sat_img, date = get_nasa_feed(lat, lon)
-                if not sat_img:
-                    st.warning("Using Archive Image (Night Orbit)")
-                    url = "https://upload.wikimedia.org/wikipedia/commons/thumb/5/5e/Cumulonimbus_cloud_over_Singapore.jpg/800px-Cumulonimbus_cloud_over_Singapore.jpg"
-                    sat_img = load_image_from_url(url)
-            
-            # 2. SHOW USER WHAT AI SEES
-            col1, col2 = st.columns([1, 2])
-            with col1:
-                st.image(sat_img, caption="Input 1: NASA VIIRS Visual", use_column_width=True)
-            with col2:
-                st.code(f"Input 2: Telemetry JSON\nHumidity: {w['humidity']}%\nTemp: {w['temp']}C\nPressure: {w['pressure']}hPa", language="json")
+                sat_img, status = get_nasa_feed(lat, lon)
+                st.image(sat_img, caption=f"Input Source: {status}", width=400)
 
-            # 3. RUN GEMINI WITH SUPER PROMPT
+            # 2. RUN GEMINI
             genai.configure(api_key=api_key)
             try:
+                # Trying the newest model first
                 model = genai.GenerativeModel('gemini-2.0-flash')
             except:
                 model = genai.GenerativeModel('gemini-1.5-flash')
