@@ -167,7 +167,7 @@ with col2:
 # --- COLUMN 3: INTELLIGENCE (GEMINI) ---
 with col3:
     st.header("3. AI Analysis")
-    st.caption("Engine: Google Gemini 1.5 Flash")
+    st.caption("Engine: Google Gemini 2.5 Flash")
     
     st.write("Fusion of Visual + Numerical Data:")
     
@@ -178,7 +178,7 @@ with col3:
             # Check if satellite image exists before sending
             if sat_img:
                 genai.configure(api_key=google_key)
-                model = genai.GenerativeModel('gemini-1.5-flash')
+                model = genai.GenerativeModel('gemini-2.5-flash')
                 
                 # THE PROMPT STRATEGY
                 prompt = f"""
@@ -196,7 +196,7 @@ with col3:
                 1. Analyze the cloud texture in the image (Convective vs Stratiform).
                 2. Evaluate Telemetry (Is humidity > 40%? Is cloud base reachable?).
                 3. DECISION: 'GO' or 'NO-GO' for Hygroscopic Seeding.
-                4. REASONING: 1 sentence scientific explanation.
+                4. REASONING: 1 sentence scientific explanation, and describe what data you are seeing/what's being given to you
                 
                 Output Format: JSON.
                 """
