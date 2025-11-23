@@ -7,34 +7,34 @@ from io import BytesIO
 import streamlit.components.v1 as components
 import folium
 from streamlit_folium import st_folium
+import pandas as pd
+import math
 
 # --- CONFIGURATION ---
-# Leave empty for GitHub (User pastes in Sidebar for security)
 DEFAULT_API_KEY = "AIzaSyAZsUnki7M2SJjPYfZ5NHJ8LX3xMtboUDU" 
 WEATHER_API_KEY = "11b260a4212d29eaccbd9754da459059" 
 
-st.set_page_config(page_title="VisionRain Data Core", layout="wide", page_icon="⛈️")
+st.set_page_config(page_title="VisionRain Omni-Core", layout="wide", page_icon="⛈️")
 
 # --- STYLING ---
 st.markdown("""
     <style>
     .stApp {background-color: #0e1117;}
     .stMetric {background-color: #1f2937; border: 1px solid #374151; border-radius: 8px;}
-    h1, h2, h3 {color: #60a5fa;}
+    h1, h2, h3 {color: #4facfe;}
     </style>
     """, unsafe_allow_html=True)
 
-# --- ROBUST IMAGE LOADER ---
+# --- 1. ROBUST IMAGE LOADER ---
 def load_image_from_url(url):
     try:
         headers = {'User-Agent': 'Mozilla/5.0'}
         r = requests.get(url, headers=headers, timeout=5)
-        if r.status_code == 200:
-            return Image.open(BytesIO(r.content))
+        if r.status_code == 200: return Image.open(BytesIO(r.content))
     except: pass
     return None
 
-# --- 1. NASA SATELLITE FETCHER (With Fallback) ---
+# --- 2. NASA SATELLITE FEED ---
 def get_nasa_feed(lat, lon):
     today = datetime.datetime.utcnow().strftime("%Y-%m-%d")
     bbox = f"{lon-5},{lat-5},{lon+5},{lat+5}" 
@@ -47,167 +47,216 @@ def get_nasa_feed(lat, lon):
     }
     try:
         full_url = requests.Request('GET', url, params=params).prepare().url
-        img = load_image_from_url(full_url)
-        if img: return img, "Live Feed (NASA VIIRS)"
-    except: pass
-    
-    # FALLBACK IF NASA FAILS
-    backup_url = "https://upload.wikimedia.org/wikipedia/commons/thumb/5/5e/Cumulonimbus_cloud_over_Singapore.jpg/800px-Cumulonimbus_cloud_over_Singapore.jpg"
-    return load_image_from_url(backup_url), "Archive Backup (Night/Offline)"
+        return load_image_from_url(full_url), today
+    except: return None, None
 
-# --- 2. WEATHER TELEMETRY ---
-def get_weather_telemetry(lat, lon):
-    if WEATHER_API_KEY:
-        try:
-            url = f"https://api.openweathermap.org/data/2.5/weather?lat={lat}&lon={lon}&appid={WEATHER_API_KEY}&units=metric"
-            return requests.get(url).json()['main']
-        except: pass
-    return {"humidity": 65, "temp": 32, "pressure": 1012} 
+# --- 3. BACKGROUND TILE FETCHER (For Gemini) ---
+def get_static_map_layer(layer, lat, lon, api_key):
+    """Fetches static maps (Clouds/Wind/Rain) for AI analysis"""
+    if not api_key: return None
+    try:
+        zoom = 6
+        n = 2.0 ** zoom
+        xtile = int((lon + 180.0) / 360.0 * n)
+        ytile = int((1.0 - math.asinh(math.tan(math.radians(lat))) / math.pi) / 2.0 * n)
+        url = f"https://tile.openweathermap.org/map/{layer}_new/{zoom}/{xtile}/{ytile}.png?appid={api_key}"
+        return load_image_from_url(url)
+    except: return None
 
-# --- SIDEBAR: INTERACTIVE MISSION CONTROL ---
+# --- 4. NUMERICAL DATA (OWM) ---
+def get_owm_data(lat, lon, key):
+    if not key: return None
+    try:
+        url = f"https://api.openweathermap.org/data/2.5/weather?lat={lat}&lon={lon}&appid={key}&units=metric"
+        return requests.get(url).json()
+    except: return None
+
+# --- 5. NUMERICAL DATA (WINDY/ECMWF MODEL) ---
+def get_windy_data(lat, lon):
+    try:
+        url = f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&current=temperature_2m,relative_humidity_2m,wind_speed_10m,cloud_cover,surface_pressure"
+        return requests.get(url).json()['current']
+    except: return None
+
+# --- 6. WINDY EMBED BUILDER ---
+def render_windy(lat, lon, overlay):
+    url = f"https://embed.windy.com/embed2.html?lat={lat}&lon={lon}&detailLat={lat}&detailLon={lon}&width=800&height=500&zoom=6&level=surface&overlay={overlay}&product=ecmwf&menu=&message=&marker=&calendar=now&pressure=&type=map&location=coordinates&detail=&metricWind=default&metricTemp=default&radarRange=-1"
+    components.iframe(url, height=500)
+
+# --- SIDEBAR ---
 with st.sidebar:
     st.image("https://cdn-icons-png.flaticon.com/512/414/414927.png", width=80)
     st.title("VisionRain")
-    st.caption("Data Verification System")
+    st.caption("Omni-Sensor Fusion Core")
     
     api_key = st.text_input("Google AI Key", value=DEFAULT_API_KEY, type="password")
-    weather_key = st.text_input("OpenWeatherMap Key", value=WEATHER_API_KEY, type="password")
+    weather_key = st.text_input("OpenWeather Key", value=WEATHER_API_KEY, type="password")
     
     st.markdown("---")
-    st.markdown("### 📍 Select Target")
-    st.caption("Click map to update coordinates")
-
-    # --- INTERACTIVE MAP PICKER (FOLIUM) ---
+    st.markdown("### 📍 Target Selector")
+    target_name = st.text_input("Region Name", "Jeddah")
+    
+    # Initialize State
     if 'lat' not in st.session_state: st.session_state['lat'] = 21.5433
     if 'lon' not in st.session_state: st.session_state['lon'] = 39.1728
 
+    # Interactive Map
     m = folium.Map(location=[st.session_state['lat'], st.session_state['lon']], zoom_start=5)
     m.add_child(folium.LatLngPopup()) 
-    
-    map_data = st_folium(m, height=250, width=280)
+    map_data = st_folium(m, height=200, width=280)
 
     if map_data['last_clicked']:
         st.session_state['lat'] = map_data['last_clicked']['lat']
         st.session_state['lon'] = map_data['last_clicked']['lng']
         st.rerun()
 
-    # Display Coordinates
-    c1, c2 = st.columns(2)
-    c1.metric("Lat", f"{st.session_state['lat']:.4f}")
-    c2.metric("Lon", f"{st.session_state['lon']:.4f}")
-    
-    lat = st.session_state['lat']
-    lon = st.session_state['lon']
-    
-    st.success("Target Locked")
+    lat, lon = st.session_state['lat'], st.session_state['lon']
+    st.info(f"Coords: {lat:.4f}, {lon:.4f}")
 
 # --- MAIN DASHBOARD ---
-st.title("VisionRain Data Command Center")
-st.markdown(f"### *Sector Analysis Coordinates: {lat:.4f}, {lon:.4f}*")
+st.title("VisionRain Omni-Core")
+st.markdown(f"### *Sector Analysis: {target_name}*")
 
-tab1, tab2 = st.tabs(["📡 Live Global Dynamics (Windy)", "🧠 Gemini Fusion Core"])
+tab1, tab2, tab3 = st.tabs(["👁️ The Windy Wall (Visuals)", "📊 Data Truth (Comparison)", "🧠 Gemini Super-Fusion"])
 
-# TAB 1: DATA FUSION (WINDY + OWM)
+# TAB 1: THE 7 LAYERS (VISUALS)
 with tab1:
-    st.header("1. Real-Time Environmental Monitoring")
+    st.header("1. Global Atmospheric Dynamics")
+    layer_opt = st.selectbox("Select Sensor Layer:", 
+        ["1. NASA Satellite (TrueColor)", "2. Windy Satellite (Infrared)", "3. Windy Radar (Precipitation)", 
+         "4. Windy Clouds", "5. Windy Wind", "6. Windy Rain & Thunder", "7. Windy Pressure (Weather)"])
     
-    col_visual, col_data = st.columns([2, 1])
-    
-    # LEFT: WINDY.COM EMBED
-    with col_visual:
-        st.subheader("A. Atmospheric Dynamics (Windy.com)")
-        windy_url = f"https://embed.windy.com/embed2.html?lat={lat}&lon={lon}&detailLat={lat}&detailLon={lon}&width=800&height=500&zoom=6&level=surface&overlay=rain&product=ecmwf&menu=&message=&marker=&calendar=now&pressure=&type=map&location=coordinates&detail=&metricWind=default&metricTemp=default&radarRange=-1"
-        components.iframe(windy_url, height=500)
-        st.caption(f"Live Radar & Wind @ {lat:.2f}, {lon:.2f}")
-
-    # RIGHT: TELEMETRY (THE NUMBERS)
-    with col_data:
-        st.subheader("B. Local Telemetry")
-        w = get_weather_telemetry(lat, lon)
-        
-        st.metric("Relative Humidity", f"{w['humidity']}%", "Target > 40%")
-        st.metric("Temperature", f"{w['temp']}°C")
-        st.metric("Pressure", f"{w['pressure']} hPa")
-        
-        if w['humidity'] > 40:
-            st.success("✅ Conditions: SEEDABLE")
+    if "1. NASA" in layer_opt:
+        st.subheader("NASA VIIRS Optical Downlink")
+        img, date = get_nasa_feed(lat, lon)
+        if img: 
+            st.image(img, caption=f"Real-Time Optical Feed | {date}", use_column_width=True)
+            st.session_state['ai_sat'] = img
         else:
-            st.error("⚠️ Conditions: TOO DRY")
-            
-        st.markdown("---")
-        st.info("""
-        **Active Data Streams:**
-        1. **Visual:** Windy.com (Interactive)
-        2. **Numerical:** OpenWeatherMap API
-        3. **Analysis:** Gemini 2.0 Flash
-        """)
+            st.warning("NASA Feed Offline (Night). Using Archive.")
+            backup_url = "https://upload.wikimedia.org/wikipedia/commons/thumb/5/5e/Cumulonimbus_cloud_over_Singapore.jpg/800px-Cumulonimbus_cloud_over_Singapore.jpg"
+            st.session_state['ai_sat'] = load_image_from_url(backup_url)
+            st.image(st.session_state['ai_sat'], caption="Archive Backup")
+    elif "2. Windy Satellite" in layer_opt: render_windy(lat, lon, "satellite")
+    elif "3. Windy Radar" in layer_opt: render_windy(lat, lon, "radar")
+    elif "4. Windy Clouds" in layer_opt: render_windy(lat, lon, "clouds")
+    elif "5. Windy Wind" in layer_opt: render_windy(lat, lon, "wind")
+    elif "6. Windy Rain" in layer_opt: render_windy(lat, lon, "rain")
+    elif "7. Windy Pressure" in layer_opt: render_windy(lat, lon, "pressure")
 
-# TAB 2: AI ANALYSIS (SUPER PROMPT)
+# TAB 2: DATA TRUTH (NUMERICAL)
 with tab2:
-    st.header("2. Gemini Fusion Engine")
-    st.write("The AI captures a **Static Satellite Snapshot** (NASA) + **Telemetry** (OpenWeather) to perform analysis.")
+    st.header("2. Telemetry Validation")
+    st.write("Comparing **Live Station Data** (OpenWeather) vs **Predictive Models** (Windy/ECMWF).")
     
-    if st.button("RUN DIAGNOSTICS", type="primary"):
-        if not api_key:
-            st.error("🔑 API Key Missing!")
-        else:
-            # 1. FETCH ASSETS FOR AI
-            with st.spinner("Acquiring NASA Optical Downlink for Analysis..."):
-                sat_img, status = get_nasa_feed(lat, lon)
-                st.image(sat_img, caption=f"Input Source: {status}", width=400)
+    owm = get_owm_data(lat, lon, weather_key)
+    windy = get_windy_data(lat, lon)
+    
+    if owm and windy:
+        comp_data = {
+            "Metric": ["Temperature", "Humidity", "Wind Speed", "Cloud Cover", "Pressure"],
+            "OpenWeather (Live Station)": [f"{owm['main']['temp']} °C", f"{owm['main']['humidity']}%", f"{owm['wind']['speed']} m/s", f"{owm['clouds']['all']}%", f"{owm['main']['pressure']} hPa"],
+            "Windy/ECMWF (Model)": [f"{windy['temperature_2m']} °C", f"{windy['relative_humidity_2m']}%", f"{windy['wind_speed_10m']} m/s", f"{windy['cloud_cover']}%", f"{windy['surface_pressure']} hPa"]
+        }
+        df = pd.DataFrame(comp_data)
+        st.table(df)
+        consensus_humid = (owm['main']['humidity'] + windy['relative_humidity_2m']) / 2
+    else:
+        st.error("⚠️ Enter OpenWeatherMap Key in Sidebar to load data.")
+        consensus_humid = 65
 
-            # 2. RUN GEMINI
+# TAB 3: GEMINI SUPER FUSION
+with tab3:
+    st.header("3. Gemini Fusion Core")
+    
+    # --- AUTOMATIC DATA GATHERING ---
+    # We fetch all assets automatically so the user sees what the AI sees
+    if not api_key:
+        st.error("🔑 Please enter Google API Key in the Sidebar.")
+    elif not weather_key:
+        st.error("⚠️ Please enter OpenWeatherMap Key in the Sidebar.")
+    else:
+        st.success("✅ AUTHENTICATED. Preparing AI Input Payload...")
+        
+        # 1. FETCH ALL STATIC MAPS (The "Eyes")
+        with st.spinner("Aggregating Multi-Sensor Visuals..."):
+            # Satellite
+            if 'ai_sat' not in st.session_state:
+                img, _ = get_nasa_feed(lat, lon)
+                st.session_state['ai_sat'] = img if img else load_image_from_url("https://upload.wikimedia.org/wikipedia/commons/thumb/5/5e/Cumulonimbus_cloud_over_Singapore.jpg/800px-Cumulonimbus_cloud_over_Singapore.jpg")
+            
+            # OWM Layers
+            ai_radar = get_static_map_layer("precipitation", lat, lon, weather_key)
+            ai_wind = get_static_map_layer("wind", lat, lon, weather_key)
+            ai_clouds = get_static_map_layer("clouds", lat, lon, weather_key)
+
+        # 2. DISPLAY THE PAYLOAD (What the User & AI See)
+        st.markdown("### 👁️ AI Visual Inputs")
+        c1, c2, c3, c4 = st.columns(4)
+        c1.image(st.session_state['ai_sat'], caption="1. Optical Satellite", use_column_width=True)
+        if ai_clouds: c2.image(ai_clouds, caption="2. Cloud Density Map", use_column_width=True)
+        if ai_radar: c3.image(ai_radar, caption="3. Precipitation Radar", use_column_width=True)
+        if ai_wind: c4.image(ai_wind, caption="4. Wind Dynamics", use_column_width=True)
+
+        # 3. DISPLAY THE NUMBERS (What the AI Reads)
+        st.markdown("### 🔢 AI Telemetry Inputs")
+        if owm:
+            st.json({
+                "Consensus_Humidity": f"{consensus_humid}%",
+                "Station_Pressure": f"{owm['main']['pressure']} hPa",
+                "Wind_Gusts": f"{owm.get('wind', {}).get('gust', 0)} m/s",
+                "Cloud_Cover": f"{owm['clouds']['all']}%"
+            })
+
+        st.divider()
+
+        # 4. THE RED BUTTON
+        if st.button("🚀 RUN HYPER-LOCAL DIAGNOSTICS", type="primary"):
             genai.configure(api_key=api_key)
             try:
-                # Trying the newest model first
                 model = genai.GenerativeModel('gemini-2.0-flash')
             except:
                 model = genai.GenerativeModel('gemini-1.5-flash')
             
-            # --- THE SUPER PROMPT ---
             prompt = f"""
-            ACT AS A LEAD ATMOSPHERIC SCIENTIST for the Saudi Rain Enhancement Program.
-            Your task is to analyze multi-modal sensor data to authorize a Cloud Seeding Mission.
+            ACT AS A LEAD METEOROLOGIST. Analyze this 4-Layer Sensor Array.
             
             --- MISSION CONTEXT ---
-            Target Coordinates: {lat}, {lon}
-            Objective: Enhance precipitation via Hygroscopic Seeding (Salt Flares).
+            Location: {target_name} ({lat}, {lon})
+            Objective: Hygroscopic Cloud Seeding.
             
-            --- INPUT DATA STREAMS ---
-            1. VISUAL SATELLITE (Image 1): Visible Spectrum (VIIRS). Look for cloud texture (lumpy = convective).
-            2. TELEMETRY SENSORS:
-               - Humidity: {w['humidity']}% (Threshold > 40%)
-               - Temperature: {w['temp']}°C
-               - Pressure: {w['pressure']} hPa
+            --- NUMERICAL DATA ---
+            - Consensus Humidity: {consensus_humid}%
+            - Pressure: {owm['main']['pressure'] if owm else 'N/A'} hPa
             
-            --- ANALYSIS PROTOCOL (Step-by-Step) ---
+            --- VISUAL DATA (Attached) ---
+            Image 1: Satellite (Texture).
+            Image 2: Cloud Density (Grey scale).
+            Image 3: Radar (Colors = Rain).
+            Image 4: Wind (Streamlines).
             
-            STEP 1: VISUAL OBSERVATION
-            Describe exactly what you see in the Satellite Image. 
-            - Are the clouds flat/hazy (Stratiform) or tall/lumpy (Convective)?
-            - Distinct features: Anvils, Overshooting tops, or clear skies?
-            
-            STEP 2: THERMODYNAMIC VALIDATION
-            Does the Humidity ({w['humidity']}%) support droplet growth?
-            
-            STEP 3: OPERATIONAL DECISION
-            - STATUS: [GO / NO-GO]
-            - CONFIDENCE: [0-100%]
-            - ACTION: Recommend specific seeding agent (Hygroscopic vs Glaciogenic).
-            
-            Output Format: Structured Markdown.
+            --- TASK ---
+            1. VISUAL ANALYSIS: Synthesize the patterns across all 4 images.
+            2. CORRELATION: Does the Radar (Image 3) confirm the Cloud Density (Image 2)?
+            3. DECISION: **GO** or **NO-GO**?
+            4. REASONING: Scientific justification.
             """
             
-            with st.spinner("Gemini is processing..."):
+            inputs = [prompt, st.session_state['ai_sat']]
+            if ai_clouds: inputs.append(ai_clouds)
+            if ai_radar: inputs.append(ai_radar)
+            if ai_wind: inputs.append(ai_wind)
+            
+            with st.spinner("Gemini 2.0 is fusing 4 visual streams + telemetry..."):
                 try:
-                    res = model.generate_content([prompt, sat_img])
-                    st.markdown("### 🤖 AI Mission Report")
+                    res = model.generate_content(inputs)
+                    st.markdown("### 🛰️ Mission Command Report")
                     st.write(res.text)
                     
                     if "GO" in res.text.upper() and "NO-GO" not in res.text.upper():
-                        st.success("✅ MISSION APPROVED")
+                        st.success("✅ MISSION APPROVED: Atmospheric Conditions Optimal.")
                         st.balloons()
                     elif "NO-GO" in res.text.upper():
-                        st.error("⛔ MISSION ABORTED")
+                        st.error("⛔ MISSION ABORTED: Conditions Unsuitable.")
                 except Exception as e:
                     st.error(f"AI Error: {e}")
