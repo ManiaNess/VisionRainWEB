@@ -9,6 +9,7 @@ import folium
 from streamlit_folium import st_folium
 import pandas as pd
 import math
+import time
 
 # --- CONFIGURATION ---
 DEFAULT_API_KEY = "AIzaSyAZsUnki7M2SJjPYfZ5NHJ8LX3xMtboUDU" 
@@ -34,7 +35,19 @@ def load_image_from_url(url):
     except: pass
     return None
 
-# --- 2. NASA SATELLITE FEED ---
+# --- 2. GEOCODING (FIXED) ---
+def get_coordinates(city_name, api_key):
+    """Converts City Name -> Lat/Lon"""
+    if not api_key: return None, None
+    try:
+        url = f"http://api.openweathermap.org/geo/1.0/direct?q={city_name}&limit=1&appid={api_key}"
+        data = requests.get(url).json()
+        if data:
+            return data[0]['lat'], data[0]['lon']
+    except: pass
+    return None, None
+
+# --- 3. NASA SATELLITE FEED ---
 def get_nasa_feed(lat, lon):
     today = datetime.datetime.utcnow().strftime("%Y-%m-%d")
     bbox = f"{lon-5},{lat-5},{lon+5},{lat+5}" 
@@ -50,9 +63,8 @@ def get_nasa_feed(lat, lon):
         return load_image_from_url(full_url), today
     except: return None, None
 
-# --- 3. BACKGROUND TILE FETCHER (For Gemini) ---
+# --- 4. BACKGROUND TILE FETCHER ---
 def get_static_map_layer(layer, lat, lon, api_key):
-    """Fetches static maps (Clouds/Wind/Rain) for AI analysis"""
     if not api_key: return None
     try:
         zoom = 6
@@ -63,7 +75,7 @@ def get_static_map_layer(layer, lat, lon, api_key):
         return load_image_from_url(url)
     except: return None
 
-# --- 4. NUMERICAL DATA (OWM) ---
+# --- 5. NUMERICAL DATA (OWM) ---
 def get_owm_data(lat, lon, key):
     if not key: return None
     try:
@@ -71,16 +83,19 @@ def get_owm_data(lat, lon, key):
         return requests.get(url).json()
     except: return None
 
-# --- 5. NUMERICAL DATA (WINDY/ECMWF MODEL) ---
+# --- 6. NUMERICAL DATA (WINDY/ECMWF) ---
 def get_windy_data(lat, lon):
     try:
         url = f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&current=temperature_2m,relative_humidity_2m,wind_speed_10m,cloud_cover,surface_pressure"
         return requests.get(url).json()['current']
     except: return None
 
-# --- 6. WINDY EMBED BUILDER ---
+# --- 7. WINDY EMBED BUILDER ---
 def render_windy(lat, lon, overlay):
-    url = f"https://embed.windy.com/embed2.html?lat={lat}&lon={lon}&detailLat={lat}&detailLon={lon}&width=800&height=500&zoom=6&level=surface&overlay={overlay}&product=ecmwf&menu=&message=&marker=&calendar=now&pressure=&type=map&location=coordinates&detail=&metricWind=default&metricTemp=default&radarRange=-1"
+    # Added 'marker=true' and 'location=coordinates' to force it to jump to specific lat/lon
+    # Added timestamp to URL to force Streamlit to reload the iframe on change
+    ts = int(time.time()) 
+    url = f"https://embed.windy.com/embed2.html?lat={lat}&lon={lon}&detailLat={lat}&detailLon={lon}&width=800&height=500&zoom=6&level=surface&overlay={overlay}&product=ecmwf&menu=&message=&marker=true&calendar=now&pressure=&type=map&location=coordinates&detail=&metricWind=default&metricTemp=default&radarRange=-1&t={ts}"
     components.iframe(url, height=500)
 
 # --- SIDEBAR ---
@@ -94,11 +109,28 @@ with st.sidebar:
     
     st.markdown("---")
     st.markdown("### 📍 Target Selector")
-    target_name = st.text_input("Region Name", "Jeddah")
+    
+    # --- SEARCH FUNCTIONALITY (RESTORED) ---
+    target_input = st.text_input("Region Name", "Jeddah")
     
     # Initialize State
     if 'lat' not in st.session_state: st.session_state['lat'] = 21.5433
     if 'lon' not in st.session_state: st.session_state['lon'] = 39.1728
+    if 'target_name' not in st.session_state: st.session_state['target_name'] = "Jeddah"
+
+    if st.button("Find Location"):
+        if weather_key:
+            new_lat, new_lon = get_coordinates(target_input, weather_key)
+            if new_lat:
+                st.session_state['lat'] = new_lat
+                st.session_state['lon'] = new_lon
+                st.session_state['target_name'] = target_input
+                st.success(f"Locked: {target_input}")
+                st.rerun()
+            else:
+                st.error("City not found.")
+        else:
+            st.warning("Enter Weather Key to enable Search")
 
     # Interactive Map
     m = folium.Map(location=[st.session_state['lat'], st.session_state['lon']], zoom_start=5)
@@ -108,9 +140,12 @@ with st.sidebar:
     if map_data['last_clicked']:
         st.session_state['lat'] = map_data['last_clicked']['lat']
         st.session_state['lon'] = map_data['last_clicked']['lng']
+        st.session_state['target_name'] = "Custom Coordinates"
         st.rerun()
 
     lat, lon = st.session_state['lat'], st.session_state['lon']
+    target_name = st.session_state['target_name']
+    
     st.info(f"Coords: {lat:.4f}, {lon:.4f}")
 
 # --- MAIN DASHBOARD ---
@@ -137,6 +172,7 @@ with tab1:
             backup_url = "https://upload.wikimedia.org/wikipedia/commons/thumb/5/5e/Cumulonimbus_cloud_over_Singapore.jpg/800px-Cumulonimbus_cloud_over_Singapore.jpg"
             st.session_state['ai_sat'] = load_image_from_url(backup_url)
             st.image(st.session_state['ai_sat'], caption="Archive Backup")
+            
     elif "2. Windy Satellite" in layer_opt: render_windy(lat, lon, "satellite")
     elif "3. Windy Radar" in layer_opt: render_windy(lat, lon, "radar")
     elif "4. Windy Clouds" in layer_opt: render_windy(lat, lon, "clouds")
@@ -169,8 +205,6 @@ with tab2:
 with tab3:
     st.header("3. Gemini Fusion Core")
     
-    # --- AUTOMATIC DATA GATHERING ---
-    # We fetch all assets automatically so the user sees what the AI sees
     if not api_key:
         st.error("🔑 Please enter Google API Key in the Sidebar.")
     elif not weather_key:
@@ -178,40 +212,31 @@ with tab3:
     else:
         st.success("✅ AUTHENTICATED. Preparing AI Input Payload...")
         
-        # 1. FETCH ALL STATIC MAPS (The "Eyes")
-        with st.spinner("Aggregating Multi-Sensor Visuals..."):
-            # Satellite
-            if 'ai_sat' not in st.session_state:
-                img, _ = get_nasa_feed(lat, lon)
-                st.session_state['ai_sat'] = img if img else load_image_from_url("https://upload.wikimedia.org/wikipedia/commons/thumb/5/5e/Cumulonimbus_cloud_over_Singapore.jpg/800px-Cumulonimbus_cloud_over_Singapore.jpg")
-            
-            # OWM Layers
-            ai_radar = get_static_map_layer("precipitation", lat, lon, weather_key)
-            ai_wind = get_static_map_layer("wind", lat, lon, weather_key)
-            ai_clouds = get_static_map_layer("clouds", lat, lon, weather_key)
-
-        # 2. DISPLAY THE PAYLOAD (What the User & AI See)
-        st.markdown("### 👁️ AI Visual Inputs")
-        c1, c2, c3, c4 = st.columns(4)
-        c1.image(st.session_state['ai_sat'], caption="1. Optical Satellite", use_column_width=True)
-        if ai_clouds: c2.image(ai_clouds, caption="2. Cloud Density Map", use_column_width=True)
-        if ai_radar: c3.image(ai_radar, caption="3. Precipitation Radar", use_column_width=True)
-        if ai_wind: c4.image(ai_wind, caption="4. Wind Dynamics", use_column_width=True)
-
-        # 3. DISPLAY THE NUMBERS (What the AI Reads)
-        st.markdown("### 🔢 AI Telemetry Inputs")
-        if owm:
-            st.json({
-                "Consensus_Humidity": f"{consensus_humid}%",
-                "Station_Pressure": f"{owm['main']['pressure']} hPa",
-                "Wind_Gusts": f"{owm.get('wind', {}).get('gust', 0)} m/s",
-                "Cloud_Cover": f"{owm['clouds']['all']}%"
-            })
-
-        st.divider()
-
-        # 4. THE RED BUTTON
         if st.button("🚀 RUN HYPER-LOCAL DIAGNOSTICS", type="primary"):
+            
+            # 1. FETCH ALL STATIC MAPS (The "Eyes" for AI)
+            with st.spinner("Aggregating Multi-Sensor Visuals..."):
+                # Satellite
+                if 'ai_sat' not in st.session_state or st.session_state['ai_sat'] is None:
+                    img, _ = get_nasa_feed(lat, lon)
+                    st.session_state['ai_sat'] = img if img else load_image_from_url("https://upload.wikimedia.org/wikipedia/commons/thumb/5/5e/Cumulonimbus_cloud_over_Singapore.jpg/800px-Cumulonimbus_cloud_over_Singapore.jpg")
+                
+                # OWM Layers
+                ai_radar = get_static_map_layer("precipitation", lat, lon, weather_key)
+                ai_wind = get_static_map_layer("wind", lat, lon, weather_key)
+                ai_clouds = get_static_map_layer("clouds", lat, lon, weather_key)
+
+            # 2. DISPLAY PAYLOAD
+            st.markdown("### 👁️ AI Visual Inputs")
+            c1, c2, c3, c4 = st.columns(4)
+            
+            # Safe Display
+            if st.session_state['ai_sat']: c1.image(st.session_state['ai_sat'], caption="1. Optical Satellite", use_column_width=True)
+            if ai_clouds: c2.image(ai_clouds, caption="2. Cloud Density", use_column_width=True)
+            if ai_radar: c3.image(ai_radar, caption="3. Radar", use_column_width=True)
+            if ai_wind: c4.image(ai_wind, caption="4. Wind", use_column_width=True)
+
+            # 3. EXECUTE AI
             genai.configure(api_key=api_key)
             try:
                 model = genai.GenerativeModel('gemini-2.0-flash')
@@ -247,16 +272,13 @@ with tab3:
             if ai_radar: inputs.append(ai_radar)
             if ai_wind: inputs.append(ai_wind)
             
-            with st.spinner("Gemini 2.0 is fusing 4 visual streams + telemetry..."):
+            with st.spinner("Gemini is fusing 4 visual streams + telemetry..."):
                 try:
                     res = model.generate_content(inputs)
                     st.markdown("### 🛰️ Mission Command Report")
                     st.write(res.text)
-                    
                     if "GO" in res.text.upper() and "NO-GO" not in res.text.upper():
-                        st.success("✅ MISSION APPROVED: Atmospheric Conditions Optimal.")
                         st.balloons()
-                    elif "NO-GO" in res.text.upper():
-                        st.error("⛔ MISSION ABORTED: Conditions Unsuitable.")
+                        st.success("✅ MISSION APPROVED")
                 except Exception as e:
                     st.error(f"AI Error: {e}")
