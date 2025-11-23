@@ -7,7 +7,7 @@ from io import BytesIO
 import math
 
 # --- CONFIGURATION ---
-DEFAULT_GOOGLE_KEY = "2e858addee7966d8559ad29c02a5ee30"
+DEFAULT_GOOGLE_KEY = "49a39cd5e4339bcf47a91de6c03edd0d5149474d"
 DEFAULT_WEATHER_KEY = "11b260a4212d29eaccbd9754da459059"
 
 st.set_page_config(page_title="VisionRain Sensor Array", layout="wide", page_icon="🛰️")
