@@ -5,15 +5,16 @@ import requests
 import datetime
 from io import BytesIO
 import streamlit.components.v1 as components
+import os
 
 # --- CONFIGURATION ---
-# For GitHub security, it's best to leave these empty and paste them in the Sidebar UI.
-DEFAULT_API_KEY = "AIzaSyA7Yk4WRdSu976U4EpHZN47m-KA8JbJ5do" 
+# Users will paste keys in the sidebar
+DEFAULT_API_KEY = "AIzaSyA7Yk4WRdSu976U4EpHZN47m" 
 WEATHER_API_KEY = "11b260a4212d29eaccbd9754da459059" 
 
-st.set_page_config(page_title="VisionRain Data Core", layout="wide", page_icon="⛈️")
+st.set_page_config(page_title="VisionRain Data Core", layout="wide", page_icon="🛰️")
 
-# --- CUSTOM CSS ---
+# --- STYLING ---
 st.markdown("""
     <style>
     .stApp {background-color: #0e1117;}
@@ -22,19 +23,15 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# --- ROBUST IMAGE LOADER (Prevents Crashes) ---
+# --- HELPER: ROBUST IMAGE LOADER ---
 def load_image_from_url(url):
-    """Fetches an image with headers to prevent 403/404 errors from servers."""
     try:
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
-        response = requests.get(url, headers=headers, timeout=5)
-        response.raise_for_status()
-        return Image.open(BytesIO(response.content))
-    except Exception as e:
-        st.error(f"Image Load Error: {e}")
-        return None
+        headers = {'User-Agent': 'Mozilla/5.0'}
+        r = requests.get(url, headers=headers, timeout=5)
+        return Image.open(BytesIO(r.content))
+    except: return None
 
-# --- DATA FETCHING FUNCTIONS ---
+# --- DATA FETCHING ---
 def get_nasa_feed(lat, lon):
     today = datetime.datetime.utcnow().strftime("%Y-%m-%d")
     bbox = f"{lat-5},{lon-5},{lat+5},{lon+5}" 
@@ -46,7 +43,6 @@ def get_nasa_feed(lat, lon):
         "BBOX": bbox, "WIDTH": "800", "HEIGHT": "800", "TIME": today
     }
     try:
-        # Construct URL manually to pass to our robust loader
         full_url = requests.Request('GET', url, params=params).prepare().url
         return load_image_from_url(full_url), today
     except: return None, None
@@ -57,7 +53,6 @@ def get_weather_telemetry(lat, lon):
             url = f"https://api.openweathermap.org/data/2.5/weather?lat={lat}&lon={lon}&appid={WEATHER_API_KEY}&units=metric"
             return requests.get(url).json()['main']
         except: pass
-    # Fallback Simulation
     return {"humidity": 65, "temp": 32, "pressure": 1012} 
 
 # --- SIDEBAR ---
@@ -66,8 +61,8 @@ with st.sidebar:
     st.title("VisionRain")
     st.caption("Data Verification System")
     
-    st.markdown("### 🔑 Access Keys")
     api_key = st.text_input("Google AI Key", value=DEFAULT_API_KEY, type="password")
+    weather_key = st.text_input("OpenWeatherMap Key", value=WEATHER_API_KEY, type="password")
     
     st.markdown("---")
     st.markdown("### 📍 Target Zone")
@@ -102,7 +97,7 @@ with tab1:
                         st.image(img, caption=f"Live Feed: {date}", use_column_width=True)
                         st.session_state['sat_img'] = img
                     else:
-                        st.warning("Orbit Offline (Night). Using Backup.")
+                        st.warning("Orbit Offline. Using Backup.")
                         url = "https://upload.wikimedia.org/wikipedia/commons/thumb/5/5e/Cumulonimbus_cloud_over_Singapore.jpg/800px-Cumulonimbus_cloud_over_Singapore.jpg"
                         st.session_state['sat_img'] = load_image_from_url(url)
                         st.image(st.session_state['sat_img'], caption="Backup: Archive Storm")
@@ -121,18 +116,44 @@ with tab1:
         st.metric("Pressure", f"{w['pressure']} hPa")
         st.info(f"**Status:** {'✅ SEEDABLE' if w['humidity'] > 40 else '⚠️ TOO DRY'}")
 
-    # 3. RADAR DATA
+    # 3. RADAR DATA (OPENWEATHERMAP TILES)
     with col_rad:
-        st.subheader("C. Radar (Precipitation)")
-        radar_mode = st.radio("Radar Mode:", ["Scientific Scan (Static)", "Interactive Map"])
+        st.subheader("C. Global Precipitation")
+        radar_mode = st.radio("Radar Mode:", ["Interactive Map (OpenWeather)", "Scientific Scan (Static)"])
         
-        if radar_mode == "Interactive Map":
-            # Live Widget
-            html_code = f"""<iframe src="https://www.rainviewer.com/map.html?loc={lat},{lon},6&oFa=0&oC=0&oU=0&oCS=1&oF=0&oAP=0&c=3&o=83&lm=1&layer=radar&sm=1&sn=1" width="100%" height="300" frameborder="0"></iframe>"""
-            components.html(html_code, height=300)
-            st.caption("Note: Gemini CANNOT read this map.")
+        if radar_mode == "Interactive Map (OpenWeather)":
+            if not weather_key:
+                st.error("⚠️ Enter OpenWeatherMap Key in Sidebar to see Live Radar!")
+            else:
+                # This HTML embeds a Leaflet Map using YOUR API Key for tiles
+                html_map = f"""
+                <!DOCTYPE html>
+                <html>
+                <head>
+                    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.7.1/dist/leaflet.css" />
+                    <script src="https://unpkg.com/leaflet@1.7.1/dist/leaflet.js"></script>
+                    <style>#map {{ height: 300px; width: 100%; border-radius: 10px; }}</style>
+                </head>
+                <body>
+                    <div id="map"></div>
+                    <script>
+                        var map = L.map('map').setView([{lat}, {lon}], 5);
+                        L.tileLayer('https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png', {{
+                            attribution: '© OpenStreetMap'
+                        }}).addTo(map);
+                        
+                        // OPENWEATHERMAP PRECIPITATION LAYER
+                        L.tileLayer('https://tile.openweathermap.org/map/precipitation_new/{{z}}/{{x}}/{{y}}.png?appid={weather_key}', {{
+                            opacity: 0.8
+                        }}).addTo(map);
+                    </script>
+                </body>
+                </html>
+                """
+                components.html(html_map, height=300)
+                st.caption("Layer: OWM Global Precipitation")
         else:
-            # STATIC IMAGE FOR AI ANALYSIS
+            # STATIC BACKUP
             radar_url = "https://upload.wikimedia.org/wikipedia/commons/thumb/b/b7/Radar_reflectivity.jpg/600px-Radar_reflectivity.jpg"
             st.session_state['rad_img'] = load_image_from_url(radar_url)
             if st.session_state['rad_img']:
@@ -157,17 +178,14 @@ with tab2:
             
             prompt = f"""
             You are an AI Meteorologist. Analyze these TWO inputs:
-            1. VISUAL SATELLITE (Image 1): Look for convective towers (lumpy texture).
-            2. RADAR REFLECTIVITY (Image 2): Look for Red/Yellow zones (heavy rain) vs Blue (light rain).
+            1. VISUAL SATELLITE (Image 1): Look for convective towers.
+            2. RADAR REFLECTIVITY (Image 2): Look for Red/Yellow zones.
             3. TELEMETRY: Humidity is {w['humidity']}%.
-            
             DECISION: Is this cloud system suitable for Seeding?
             FORMAT: JSON {{Decision: GO/NO-GO, Confidence: %, Reasoning: text}}
             """
             
             inputs = [prompt, st.session_state['sat_img']]
-            
-            # Add radar image if it exists
             if 'rad_img' in st.session_state and st.session_state['rad_img']:
                 inputs.append(st.session_state['rad_img'])
                 st.success("✅ Radar Data Injected into Model")
