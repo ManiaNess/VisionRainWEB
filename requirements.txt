@@ -1,4 +1,9 @@
+%%writefile requirements.txt
 streamlit
 google-generativeai
 pillow
+numpy
+matplotlib
 requests
+folium
+streamlit-folium
