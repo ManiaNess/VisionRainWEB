@@ -1,6 +1,6 @@
 streamlit
 google-generativeai
-Pillow
+pillow
 requests
 folium
 streamlit-folium
