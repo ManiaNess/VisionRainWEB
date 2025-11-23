@@ -4,10 +4,10 @@ from PIL import Image
 import requests
 import datetime
 from io import BytesIO
+import streamlit.components.v1 as components
 import os
 
 # --- CONFIGURATION ---
-# Leave empty for GitHub (User pastes in Sidebar for security)
 DEFAULT_API_KEY = "AIzaSyA7Yk4WRdSu976U4EpHZN47m-KA8JbJ5do" 
 WEATHER_API_KEY = "11b260a4212d29eaccbd9754da459059" 
 
@@ -22,35 +22,8 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# --- ASSET LOADER (Runs once to download data) ---
-@st.cache_resource
-def load_scientific_assets():
-    """Downloads backup scientific data so the app never crashes."""
-    assets = {
-        "saudi_storm_visual.jpg": "https://upload.wikimedia.org/wikipedia/commons/thumb/5/5e/Cumulonimbus_cloud_over_Singapore.jpg/800px-Cumulonimbus_cloud_over_Singapore.jpg",
-        "saudi_rain_map.jpg": "https://upload.wikimedia.org/wikipedia/commons/thumb/b/b7/Radar_reflectivity.jpg/600px-Radar_reflectivity.jpg"
-    }
-    os.makedirs("data", exist_ok=True)
-    
-    for name, url in assets.items():
-        path = os.path.join("data", name)
-        if not os.path.exists(path):
-            try:
-                headers = {'User-Agent': 'Mozilla/5.0'}
-                r = requests.get(url, headers=headers)
-                if r.status_code == 200:
-                    with open(path, 'wb') as f:
-                        f.write(r.content)
-            except: pass
-    return "Assets Loaded"
-
-# Initialize Assets
-load_scientific_assets()
-
-# --- DATA FETCHING FUNCTIONS ---
-
+# --- FETCHING ---
 def get_nasa_feed(lat, lon):
-    """Fetches Live Satellite Imagery from NASA GIBS"""
     today = datetime.datetime.utcnow().strftime("%Y-%m-%d")
     bbox = f"{lat-5},{lon-5},{lat+5},{lon+5}" 
     url = "https://gibs.earthdata.nasa.gov/wms/epsg4326/best/wms.cgi"
@@ -66,13 +39,11 @@ def get_nasa_feed(lat, lon):
     except: return None, None
 
 def get_weather_telemetry(lat, lon):
-    """Fetches Weather Data (or Simulates if key missing)"""
     if WEATHER_API_KEY:
         try:
             url = f"https://api.openweathermap.org/data/2.5/weather?lat={lat}&lon={lon}&appid={WEATHER_API_KEY}&units=metric"
             return requests.get(url).json()['main']
         except: pass
-    # Fallback Simulation
     return {"humidity": 65, "temp": 32, "pressure": 1012} 
 
 # --- SIDEBAR ---
@@ -99,12 +70,11 @@ tab1, tab2 = st.tabs(["📡 Data Verification (Live)", "🧠 AI Analysis (Gemini
 with tab1:
     st.header("1. Hydro-Meteorological Data Fusion")
     
-    # THREE COLUMNS FOR DATA
     col_sat, col_weath, col_rad = st.columns(3)
     
     # 1. SATELLITE DATA
     with col_sat:
-        st.subheader("A. Satellite (Visual)")
+        st.subheader("A. Visual Satellite")
         source_opt = st.radio("Source:", ["Live Feed (NASA)", "Archive (Storm)"], horizontal=True)
         
         if source_opt == "Live Feed (NASA)":
@@ -112,80 +82,86 @@ with tab1:
                 with st.spinner("Connecting to Suomi NPP..."):
                     img, date = get_nasa_feed(lat, lon)
                     if img:
-                        st.image(img, caption=f"Live Feed: {date} (NASA GIBS)", use_column_width=True)
-                        st.session_state['analysis_img'] = img
+                        st.image(img, caption=f"Live Feed: {date}", use_column_width=True)
+                        st.session_state['sat_img'] = img
                     else:
                         st.warning("Orbit Offline (Night). Using Archive.")
-                        st.session_state['analysis_img'] = Image.open("data/saudi_storm_visual.jpg")
-                        st.image(st.session_state['analysis_img'], caption="Backup: Archive Storm")
+                        # Use Direct URL if local file missing
+                        url = "https://upload.wikimedia.org/wikipedia/commons/thumb/5/5e/Cumulonimbus_cloud_over_Singapore.jpg/800px-Cumulonimbus_cloud_over_Singapore.jpg"
+                        st.session_state['sat_img'] = Image.open(BytesIO(requests.get(url).content))
+                        st.image(st.session_state['sat_img'], caption="Backup: Archive Storm")
         else:
-            try:
-                st.session_state['analysis_img'] = Image.open("data/saudi_storm_visual.jpg")
-                st.image(st.session_state['analysis_img'], caption="Archive: Convective System", use_column_width=True)
-            except:
-                st.error("Loading assets...")
+            # Archive Load
+            url = "https://upload.wikimedia.org/wikipedia/commons/thumb/5/5e/Cumulonimbus_cloud_over_Singapore.jpg/800px-Cumulonimbus_cloud_over_Singapore.jpg"
+            st.session_state['sat_img'] = Image.open(BytesIO(requests.get(url).content))
+            st.image(st.session_state['sat_img'], caption="Archive: Convective System", use_column_width=True)
 
     # 2. WEATHER DATA
     with col_weath:
-        st.subheader("B. Telemetry (Numerical)")
+        st.subheader("B. Telemetry")
         w = get_weather_telemetry(lat, lon)
-        
         st.metric("Relative Humidity", f"{w['humidity']}%", "Target > 40%")
         st.metric("Temperature", f"{w['temp']}°C")
         st.metric("Pressure", f"{w['pressure']} hPa")
-        
         st.info(f"**Status:** {'✅ SEEDABLE' if w['humidity'] > 40 else '⚠️ TOO DRY'}")
 
-    # 3. RADAR DATA (FIXED)
+    # 3. RADAR DATA
     with col_rad:
         st.subheader("C. Radar (Precipitation)")
+        radar_mode = st.radio("Radar Mode:", ["Scientific Scan (Static)", "Interactive Map"])
         
-        # Using the locally downloaded file
-        if os.path.exists("data/saudi_rain_map.jpg"):
-            st.image("data/saudi_rain_map.jpg", caption="NASA GPM IMERG (Rain Intensity)", use_column_width=True)
+        if radar_mode == "Interactive Map":
+            html_code = f"""<iframe src="https://www.rainviewer.com/map.html?loc={lat},{lon},6&oFa=0&oC=0&oU=0&oCS=1&oF=0&oAP=0&c=3&o=83&lm=1&layer=radar&sm=1&sn=1" width="100%" height="300" frameborder="0"></iframe>"""
+            components.html(html_code, height=300)
+            st.caption("Note: Gemini CANNOT read this map.")
         else:
-            st.warning("Radar loading...")
+            # STATIC IMAGE FOR AI ANALYSIS
+            radar_url = "https://upload.wikimedia.org/wikipedia/commons/thumb/b/b7/Radar_reflectivity.jpg/600px-Radar_reflectivity.jpg"
+            st.session_state['rad_img'] = Image.open(BytesIO(requests.get(radar_url).content))
+            st.image(st.session_state['rad_img'], caption="NASA GPM IMERG (Gemini Readable)", use_column_width=True)
 
 # TAB 2: AI ANALYSIS
 with tab2:
     st.header("2. Gemini Fusion Engine")
-    st.write("The AI analyzes the **Satellite Image** above + the **Humidity** data to make a decision.")
+    st.write("The AI analyzes **Satellite Texture** + **Radar Reflectivity** + **Humidity**.")
     
     if st.button("RUN DIAGNOSTICS"):
         if not api_key:
-            st.error("🔑 API Key Missing! Check Sidebar.")
-        elif 'analysis_img' not in st.session_state:
-            st.error("📡 No Data! Load Satellite Image in Tab 1.")
+            st.error("🔑 API Key Missing!")
+        elif 'sat_img' not in st.session_state:
+            st.error("📡 Load Satellite Data in Tab 1 first.")
         else:
             genai.configure(api_key=api_key)
-            # Try-Catch for Model Version Safety
             try:
                 model = genai.GenerativeModel('gemini-2.0-flash')
             except:
                 model = genai.GenerativeModel('gemini-1.5-flash')
             
+            # --- MULTIMODAL PROMPT ---
             prompt = f"""
-            Analyze this satellite image of {target_name} ({lat}, {lon}).
-            Telemetry Input: Humidity {w['humidity']}%.
+            You are an AI Meteorologist. Analyze these TWO inputs:
             
-            Task:
-            1. Identify cloud type (Convective vs Stratiform).
-            2. Cross-reference with humidity.
-            3. DECISION: Is this suitable for Cloud Seeding?
-            4. Return JSON: {{Decision: GO/NO-GO, Confidence: %, Reasoning: text}}
+            1. VISUAL SATELLITE (Image 1): Look for convective towers (lumpy texture).
+            2. RADAR REFLECTIVITY (Image 2): Look for Red/Yellow zones (heavy rain) vs Blue (light rain).
+            3. TELEMETRY: Humidity is {w['humidity']}%.
+            
+            DECISION: Is this cloud system suitable for Seeding?
+            FORMAT: JSON {{Decision: GO/NO-GO, Confidence: %, Reasoning: text}}
             """
+            
+            # CHECK IF WE HAVE RADAR IMAGE LOADED
+            inputs = [prompt, st.session_state['sat_img']]
+            if 'rad_img' in st.session_state:
+                inputs.append(st.session_state['rad_img']) # ADD RADAR TO AI INPUT
+                st.success("✅ Radar Data Injected into Model")
             
             with st.spinner("Fusion Engine Processing..."):
                 try:
-                    res = model.generate_content([prompt, st.session_state['analysis_img']])
+                    res = model.generate_content(inputs)
                     st.markdown("### 🤖 AI Assessment")
                     st.write(res.text)
-                    
                     if "GO" in res.text.upper():
-                        st.success("✅ CONCLUSION: Conditions Optimal for Seeding.")
+                        st.success("Conditions Optimal.")
                         st.balloons()
-                    else:
-                        st.warning("⚠️ CONCLUSION: Conditions Unsuitable.")
                 except Exception as e:
                     st.error(f"AI Error: {e}")
-                    
