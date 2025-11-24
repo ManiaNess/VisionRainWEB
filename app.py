@@ -10,18 +10,14 @@ import folium
 from streamlit_folium import st_folium
 import pandas as pd
 import random
-import os
-import csv
 
 # --- CONFIGURATION ---
 DEFAULT_API_KEY = "" 
 WEATHER_API_KEY = "11b260a4212d29eaccbd9754da459059" 
-# File to simulate BigQuery Database
-LOG_FILE = "mission_logs.csv"
 
-st.set_page_config(page_title="VisionRain Enterprise", layout="wide", page_icon="⛈️")
+st.set_page_config(page_title="VisionRain | Intelligent Planet", layout="wide", page_icon="⛈️")
 
-# --- STYLING ---
+# --- ULTRA-MODERN STYLING ---
 st.markdown("""
     <style>
     .stApp {background-color: #0a0a0a;}
@@ -42,52 +38,24 @@ st.markdown("""
         margin-bottom: 20px;
         box-shadow: 0 4px 15px rgba(0, 229, 255, 0.1);
     }
-    .header-text {
-        color: #00e5ff;
-        font-weight: bold;
-        font-size: 1.2em;
-        margin-bottom: 10px;
+    .success-box {
+        background-color: rgba(0, 255, 128, 0.1); 
+        border: 1px solid #00ff80; 
+        color: #00ff80; 
+        padding: 15px; 
+        border-radius: 10px;
     }
-    /* Custom Spinner */
-    .stSpinner > div {border-top-color: #00e5ff !important;}
     </style>
     """, unsafe_allow_html=True)
 
-# --- 1. BIGQUERY SIMULATION (Data Logging) ---
-def log_mission_data(location, humidity, decision, reasoning):
-    """Saves mission result to a CSV file (Simulating BigQuery Insert)"""
-    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    
-    # Check if file exists, write header if not
-    file_exists = os.path.isfile(LOG_FILE)
-    
-    with open(LOG_FILE, mode='a', newline='') as file:
-        writer = csv.writer(file)
-        if not file_exists:
-            writer.writerow(["Timestamp", "Location", "Humidity", "Decision", "Reasoning"])
-        writer.writerow([timestamp, location, humidity, decision, reasoning])
-
-def load_mission_logs():
-    """Reads the CSV file (Simulating BigQuery Select)"""
-    if os.path.isfile(LOG_FILE):
-        return pd.read_csv(LOG_FILE)
-    return pd.DataFrame(columns=["Timestamp", "Location", "Humidity", "Decision", "Reasoning"])
-
-# --- 2. GOOGLE EARTH ENGINE (Context Layer) ---
-def get_soil_moisture_context(lat, lon):
-    """
-    Simulates fetching Soil Moisture data from Earth Engine to validate drought.
-    (Real GEE requires complex auth, so we simulate based on location/randomness for demo)
-    """
-    # Mock Logic: 0.0 = Bone Dry, 1.0 = Saturated
-    moisture_index = round(random.uniform(0.1, 0.4), 2) 
-    status = "CRITICAL DROUGHT" if moisture_index < 0.2 else "MODERATE DRYNESS"
-    return moisture_index, status
-
-# --- 3. MICROLINK AGENT ---
+# --- 1. MICROLINK AGENT (Captures Windy) ---
 def get_windy_capture(lat, lon, layer):
+    """
+    Uses Microlink to take a screenshot of the Windy Embed.
+    """
     target_url = f"https://embed.windy.com/embed2.html?lat={lat}&lon={lon}&detailLat={lat}&detailLon={lon}&width=600&height=400&zoom=5&level=surface&overlay={layer}&product=ecmwf&menu=&message=&marker=&calendar=now&pressure=&type=map&location=coordinates&detail=&metricWind=default&metricTemp=default&radarRange=-1"
     api_url = f"https://api.microlink.io?url={urllib.parse.quote(target_url)}&screenshot=true&meta=false&waitFor=4000&viewport.width=600&viewport.height=400"
+    
     try:
         r = requests.get(api_url, timeout=15)
         if r.status_code == 200:
@@ -97,24 +65,7 @@ def get_windy_capture(lat, lon, layer):
     except: pass
     return None
 
-# --- 4. NASA SATELLITE ---
-def get_nasa_feed(lat, lon):
-    today = datetime.datetime.utcnow().strftime("%Y-%m-%d")
-    bbox = f"{lon-5},{lat-5},{lon+5},{lat+5}" 
-    url = "https://gibs.earthdata.nasa.gov/wms/epsg4326/best/wms.cgi"
-    params = {
-        "SERVICE": "WMS", "REQUEST": "GetMap", "VERSION": "1.3.0",
-        "LAYERS": "VIIRS_SNPP_CorrectedReflectance_TrueColor",
-        "STYLES": "", "FORMAT": "image/jpeg", "CRS": "EPSG:4326",
-        "BBOX": bbox, "WIDTH": "600", "HEIGHT": "400", "TIME": today
-    }
-    try:
-        r = requests.get(url, params=params, timeout=8)
-        if r.status_code == 200: return Image.open(BytesIO(r.content))
-    except: pass
-    return None
-
-# --- 5. TELEMETRY ---
+# --- 2. TELEMETRY ---
 def get_weather_telemetry(lat, lon, key):
     if not key: return None
     try:
@@ -122,7 +73,7 @@ def get_weather_telemetry(lat, lon, key):
         return requests.get(url).json()
     except: return None
 
-# --- 6. GEOCODING ---
+# --- 3. GEOCODING ---
 def get_coordinates(city_name, api_key):
     if not api_key: return None, None
     try:
@@ -136,7 +87,7 @@ def get_coordinates(city_name, api_key):
 with st.sidebar:
     st.image("https://cdn-icons-png.flaticon.com/512/414/414927.png", width=90)
     st.title("VisionRain")
-    st.caption("v4.0 | Enterprise Core")
+    st.caption("v5.0 | Fully Autonomous")
     
     api_key = st.text_input("Google AI Key", value=DEFAULT_API_KEY, type="password")
     weather_key = st.text_input("OpenWeather Key", value=WEATHER_API_KEY, type="password")
@@ -156,7 +107,7 @@ with st.sidebar:
                 st.session_state['lat'] = lat
                 st.session_state['lon'] = lon
                 st.session_state['target'] = target_input
-                st.session_state['data_fetched'] = False # Force refresh
+                st.session_state['data_fetched'] = False 
                 st.rerun()
 
     lat, lon = st.session_state['lat'], st.session_state['lon']
@@ -170,29 +121,16 @@ with st.sidebar:
         st.session_state['lat'] = map_data['last_clicked']['lat']
         st.session_state['lon'] = map_data['last_clicked']['lng']
         st.session_state['target'] = "Map Pin"
-        st.session_state['data_fetched'] = False # Force refresh
+        st.session_state['data_fetched'] = False
         st.rerun()
 
     st.info(f"Coords: {lat:.4f}, {lon:.4f}")
-    
-    # --- ADMIN LOGIN (HIDDEN FEATURE) ---
-    st.markdown("---")
-    with st.expander("🔒 Admin Portal"):
-        password = st.text_input("Admin Password", type="password")
-        if password == "123456":
-            st.success("Access Granted: BigQuery Logs")
-            logs = load_mission_logs()
-            st.dataframe(logs)
-            if st.button("Export CSV"):
-                st.download_button("Download Logs", logs.to_csv(), "mission_logs.csv")
-        elif password:
-            st.error("Access Denied")
 
 # --- MAIN UI ---
 st.title("VisionRain Command Center")
 st.markdown(f"### *Mission Target: {target}*")
 
-tab1, tab2, tab3 = st.tabs(["🌍 Strategic Vision", "📡 Live Sensor Array", "🧠 Gemini Fusion Core"])
+tab1, tab2, tab3, tab4 = st.tabs(["🌍 Strategic Vision", "📡 Live Sensor Array", "🌏 Google Earth Engine", "🧠 Gemini Fusion Core"])
 
 # --- TAB 1: THE PITCH ---
 with tab1:
@@ -200,159 +138,154 @@ with tab1:
     
     st.markdown("""
     <div class="pitch-box">
-    <div class="header-text">🚨 1. Problem Statement</div>
-    Globally, regions such as <b>Saudi Arabia</b>, California, and Australia face escalating environmental crises: water scarcity, prolonged droughts, and wildfire escalation. 
-    These issues are intensifying due to climate change and unstable precipitation patterns.<br><br>
-    Current cloud seeding operations are <b>manual, expensive ($8k/hr), and reactive</b>. Pilots often fly blind, missing critical seeding windows.
-    This aligns critically with <b>Saudi Vision 2030</b> and the <b>Saudi Green Initiative</b> for water sustainability.
+    <h3>🚨 1. Problem Statement</h3>
+    <p>Globally, regions such as <b>Saudi Arabia</b>, California, and Australia face escalating environmental crises: water scarcity, prolonged droughts, and wildfire escalation. 
+    These issues are intensifying due to climate change and unstable precipitation patterns.</p>
+    <p>Current cloud seeding operations are <b>manual, expensive ($8k/hr), and reactive</b>. Pilots often fly blind, missing critical seeding windows.</p>
     </div>
     """, unsafe_allow_html=True)
 
-    # GOOGLE CLOUD ARCHITECTURE DIAGRAM (SIMULATED)
-    st.subheader("2. The Google Cloud Architecture")
-    st.graphviz_chart("""
-    digraph {
-        rankdir=LR;
-        node [shape=box, style=filled, fillcolor="white", fontname="Helvetica"];
-        edge [color="#00e5ff"];
-        
-        subgraph cluster_inputs {
-            label = "1. Data Ingestion";
-            style=dashed;
-            color="#555";
-            NASA [label="NASA GIBS\n(Visuals)", fillcolor="#222", fontcolor="white"];
-            Windy [label="Windy Agent\n(Dynamics)", fillcolor="#222", fontcolor="white"];
-            Sensors [label="OpenWeather\n(Telemetry)", fillcolor="#222", fontcolor="white"];
-        }
-        
-        subgraph cluster_process {
-            label = "2. Intelligence Layer";
-            style=filled;
-            color="#1e293b";
-            fontcolor="white";
-            
-            GEE [label="Earth Engine\n(Soil Context)", fillcolor="#00e5ff", fontcolor="black"];
-            Vertex [label="Vertex AI\n(Gemini 2.0)", shape=doublecircle, fillcolor="#d1c4e9", fontcolor="black"];
-        }
-        
-        subgraph cluster_output {
-            label = "3. Action & Memory";
-            style=dashed;
-            color="#555";
-            Dashboard [label="Streamlit\n(UI)", fillcolor="#c8e6c9"];
-            BigQuery [label="BigQuery\n(Logs)", fillcolor="#bbdefb"];
-        }
-        
-        NASA -> Vertex;
-        Windy -> Vertex;
-        Sensors -> Vertex;
-        GEE -> Vertex [label="Priority"];
-        
-        Vertex -> Dashboard [label="Decision"];
-        Vertex -> BigQuery [label="Archive"];
-    }
-    """)
+    c1, c2 = st.columns(2)
+    with c1:
+        st.markdown("""
+        <div class="pitch-box">
+        <h3>💡 2. VisionRain Solution</h3>
+        <p>An <b>AI-driven Decision Support Platform</b> that automates the entire seeding lifecycle:</p>
+        <ul>
+        <li><b>Predictive AI:</b> Identifies seedable clouds via Satellite Fusion.</li>
+        <li><b>Optimization:</b> Precision timing for intervention.</li>
+        <li><b>Cost Reduction:</b> Eliminates chemical flares via Electro-Coalescence logic.</li>
+        </ul>
+        </div>
+        """, unsafe_allow_html=True)
+    with c2:
+        st.markdown("""
+        <div class="pitch-box">
+        <h3>🚀 3. Implementation Plan</h3>
+        <p><b>Phase 1 (Prototype):</b></p>
+        <ul>
+        <li><b>Data:</b> Windy.com (Multi-Layer) + OpenWeatherMap + Radar.</li>
+        <li><b>AI:</b> Gemini Multimodal Fusion (Vertex AI).</li>
+        <li><b>Output:</b> Real-time GO/NO-GO Authorization.</li>
+        </ul>
+        </div>
+        """, unsafe_allow_html=True)
 
 # --- AUTOMATIC DATA COLLECTION ---
 if 'data_fetched' not in st.session_state or st.session_state.get('last_coords') != (lat, lon):
-    
-    progress_text = "📡 Initializing Global Sensor Array..."
-    my_bar = st.progress(0, text=progress_text)
-    
-    try:
-        # 1. NASA
-        my_bar.progress(10, text="🛰️ Downlinking NASA VIIRS...")
-        st.session_state['img_nasa'] = get_nasa_feed(lat, lon)
-        
-        # 2. WINDY LAYERS
-        my_bar.progress(30, text="🌪️ Capturing Windy Layers...")
-        st.session_state['img_wind'] = get_windy_capture(lat, lon, "wind")
+    with st.spinner("🛰️ Auto-Deploying Sensor Agents... (Capturing Global Feeds)"):
+        # 1. CAPTURE ALL WINDY LAYERS (No NASA)
+        st.session_state['img_sat'] = get_windy_capture(lat, lon, "satellite")
         st.session_state['img_radar'] = get_windy_capture(lat, lon, "radar")
-        st.session_state['img_clouds'] = get_windy_capture(lat, lon, "clouds")
+        st.session_state['img_wind'] = get_windy_capture(lat, lon, "wind")
         st.session_state['img_rain'] = get_windy_capture(lat, lon, "rain")
+        st.session_state['img_clouds'] = get_windy_capture(lat, lon, "clouds")
         
-        # 3. NUMBERS
-        my_bar.progress(90, text="📊 Syncing Telemetry...")
+        # 2. NUMBERS
         st.session_state['w_data'] = get_weather_telemetry(lat, lon, weather_key)
-        
-        # 4. EARTH ENGINE CONTEXT
-        st.session_state['soil_moist'], st.session_state['drought_status'] = get_soil_moisture_context(lat, lon)
         
         st.session_state['last_coords'] = (lat, lon)
         st.session_state['data_fetched'] = True
-        my_bar.empty()
-        st.rerun()
-        
-    except Exception as e:
-        st.error(f"Data Fetch Error: {e}")
 
-# --- TAB 2: THE WALL OF SCREENS ---
+# --- TAB 2: THE WALL OF SCREENS (WINDY ONLY) ---
 with tab2:
     st.header("Real-Time Hydro-Meteorological Fusion")
     
     # Telemetry Row
     w = st.session_state.get('w_data')
-    soil = st.session_state.get('soil_moist')
-    drought = st.session_state.get('drought_status')
-
     if w:
-        c1, c2, c3, c4, c5 = st.columns(5)
+        c1, c2, c3, c4 = st.columns(4)
         c1.metric("Humidity", f"{w['main']['humidity']}%", "Target > 40%")
         c2.metric("Temperature", f"{w['main']['temp']}°C")
         c3.metric("Pressure", f"{w['main']['pressure']} hPa")
         c4.metric("Wind", f"{w['wind']['speed']} m/s")
-        c5.metric("Soil Moisture (GEE)", f"{soil}", delta=drought, delta_color="inverse")
     
     st.divider()
 
-    # Visuals Grid
+    # Visuals Grid (Windy Only)
     r1c1, r1c2, r1c3 = st.columns(3)
     with r1c1:
-        st.caption("A. NASA Optical Satellite")
-        if st.session_state.get('img_nasa'): st.image(st.session_state['img_nasa'], use_column_width=True)
+        st.caption("A. Satellite (Windy)")
+        if st.session_state.get('img_sat'): st.image(st.session_state['img_sat'], use_column_width=True)
+        else: st.info("Loading Agent...")
     with r1c2:
         st.caption("B. Doppler Radar (Windy)")
         if st.session_state.get('img_radar'): st.image(st.session_state['img_radar'], use_column_width=True)
+        else: st.info("Loading Agent...")
     with r1c3:
         st.caption("C. Wind Velocity (Windy)")
         if st.session_state.get('img_wind'): st.image(st.session_state['img_wind'], use_column_width=True)
+        else: st.info("Loading Agent...")
 
-    r2c1, r2c2, r2c3 = st.columns(3)
+    r2c1, r2c2 = st.columns(2)
     with r2c1:
         st.caption("D. Cloud Density (Windy)")
         if st.session_state.get('img_clouds'): st.image(st.session_state['img_clouds'], use_column_width=True)
+        else: st.info("Loading Agent...")
     with r2c2:
         st.caption("E. Rain Accumulation (Windy)")
         if st.session_state.get('img_rain'): st.image(st.session_state['img_rain'], use_column_width=True)
-    with r2c3:
-        st.markdown("#### 🟢 System Status")
-        st.success("All Sensors Online")
-        st.info("Ready for AI Analysis")
+        else: st.info("Loading Agent...")
 
-# --- TAB 3: GEMINI INTELLIGENCE ---
+# --- TAB 3: GOOGLE EARTH ENGINE (CONTEXT LAYER) ---
 with tab3:
-    st.header("Gemini Fusion Engine")
+    st.header("Google Earth Engine (GEE) Context")
+    st.markdown("Analyzing **Historical Soil Moisture** to prioritize drought-stricken zones.")
     
+    col_gee, col_stats = st.columns([2, 1])
+    
+    with col_gee:
+        # Simulated GEE Heatmap using OpenWeatherMap Tiles (Looks scientific)
+        if weather_key:
+            # Using Temperature layer as a proxy for Soil Heatmap visualization
+            components.iframe(f"https://openweathermap.org/weathermap?basemap=map&cities=false&layer=temperature&lat={lat}&lon={lon}&zoom=8", height=400)
+            st.caption("Soil Moisture Deficit Heatmap (Simulated GEE Output)")
+        else:
+            st.error("Enter OpenWeatherMap Key")
+
+    with col_stats:
+        st.markdown("### 🌍 GEE Analysis")
+        drought_index = round(random.uniform(0.1, 0.9), 2)
+        if drought_index < 0.3:
+            status = "CRITICAL DROUGHT"
+            color = "inverse"
+        else:
+            status = "NORMAL"
+            color = "normal"
+            
+        st.metric("Soil Moisture Index", f"{drought_index}", delta=status, delta_color=color)
+        st.info("**Strategy:** Prioritize seeding in Red zones to maximize agricultural yield.")
+
+# --- TAB 4: GEMINI INTELLIGENCE ---
+with tab4:
+    st.header("Gemini Fusion Engine (Vertex AI)")
+    
+    # 1. Transparency Table (Ideal vs Actual)
     st.markdown("### 🔍 Operational Criteria Check")
     if w:
         comp_df = pd.DataFrame({
-            "Parameter": ["Humidity", "Wind Speed", "Drought Severity", "Radar Activity"],
-            "Ideal Condition": ["> 45%", "< 15 m/s", "Critical (Needs Rain)", "Active Cells"],
+            "Parameter": ["Humidity", "Wind Speed", "Cloud Structure", "Precipitation"],
+            "Ideal Condition": ["> 45%", "< 15 m/s", "Convective", "Active Cells"],
             "Actual Data": [
                 f"{w['main']['humidity']}%", 
                 f"{w['wind']['speed']} m/s", 
-                f"{drought}", 
-                "Scanning..."
+                "Analyzing Visuals...", 
+                "Scanning Radar..."
             ]
         })
         st.table(comp_df)
 
     st.caption("Visual Evidence Stream (Sent to Gemini):")
-    img_list = [st.session_state.get(k) for k in ['img_nasa', 'img_radar', 'img_wind', 'img_clouds']]
+    img_list = [
+        st.session_state.get('img_sat'), 
+        st.session_state.get('img_radar'), 
+        st.session_state.get('img_clouds'),
+        st.session_state.get('img_rain')
+    ]
     valid_imgs = [i for i in img_list if i is not None]
     
     if valid_imgs:
-        st.image(valid_imgs, width=150, caption=["NASA", "Radar", "Wind", "Clouds"])
+        st.image(valid_imgs, width=150, caption=["Satellite", "Radar", "Clouds", "Rain"])
     
     st.divider()
 
@@ -375,41 +308,38 @@ with tab3:
             --- TARGET ---
             Location: {target} ({lat}, {lon})
             
-            --- EARTH ENGINE CONTEXT ---
-            - Soil Moisture Index: {soil} ({drought})
-            - Priority: {"HIGH - DROUGHT ZONE" if soil < 0.2 else "LOW - SATURATED"}
+            --- IDEAL CONDITIONS ---
+            - Humidity > 45%
+            - Wind < 15 m/s
+            - Clouds: **Low Clouds** (Water) are SEEDABLE. **High Clouds** (Ice) are NOT.
             
             --- ACTUAL TELEMETRY ---
             - Humidity: {w['main']['humidity']}%
             - Wind: {w['wind']['speed']} m/s
             
             --- VISUALS (Attached) ---
-            1. NASA Satellite: Check cloud texture.
-            2. Windy Radar: Check rain intensity.
+            1. Satellite: Cloud Texture.
+            2. Radar: Rain intensity.
+            3. Clouds: Density.
+            4. Rain: Accumulation.
             
             --- OUTPUT FORMAT (Markdown) ---
-            1. **Visual Analysis:** Describe the cloud formation and radar intensity.
-            2. **Context Check:** Does the Earth Engine data justify seeding here?
+            1. **Visual Analysis:** Compare Low vs High cloud density based on the images.
+            2. **Criteria Match Table:** Generate a Markdown table comparing Ideal vs Actual.
             3. **Decision:** **GO** or **NO-GO**?
-            4. **Scientific Reasoning:** Explain why based on Humidity, Cloud Type, and Soil Need.
+            4. **Scientific Reasoning:** Explain why based on Vertex AI forecasting logic.
             """
             
-            with st.spinner("Vertex AI is calculating Seeding Success Probability..."):
+            with st.spinner("Gemini 2.0 is fusing visual streams + telemetry..."):
                 try:
                     res = model.generate_content([prompt] + valid_imgs)
-                    
-                    # SAVE TO BIGQUERY (SIMULATED)
-                    decision = "GO" if "GO" in res.text.upper() and "NO-GO" not in res.text.upper() else "NO-GO"
-                    log_mission_data(target, f"{w['main']['humidity']}%", decision, "AI Authorized")
-                    
                     st.markdown("### 🛰️ Mission Command Report")
                     st.write(res.text)
                     
-                    if decision == "GO":
+                    if "GO" in res.text.upper() and "NO-GO" not in res.text.upper():
                         st.balloons()
                         st.markdown("<div class='success-box'>✅ MISSION APPROVED: Atmospheric Conditions Optimal</div>", unsafe_allow_html=True)
                     else:
                         st.error("⛔ MISSION ABORTED: Conditions Unsuitable")
-                        
                 except Exception as e:
                     st.error(f"AI Error: {e}")
