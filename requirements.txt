@@ -2,6 +2,5 @@ streamlit
 google-generativeai
 pillow
 requests
-numpy
-matplotlib
-scipy
+folium
+streamlit-folium
