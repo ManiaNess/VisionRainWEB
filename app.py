@@ -4,10 +4,8 @@ from PIL import Image
 import requests
 import datetime
 from io import BytesIO
-import streamlit.components.v1 as components
 import folium
 from streamlit_folium import st_folium
-import math
 import time
 
 # --- CONFIGURATION ---
@@ -32,38 +30,29 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# --- ROBUST IMAGE LOADER ---
+# --- 1. ROBUST IMAGE LOADER ---
 def load_image_from_url(url):
     try:
-        # Mimic a real browser to avoid 403 Forbidden errors
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
+        headers = {'User-Agent': 'Mozilla/5.0'}
         r = requests.get(url, headers=headers, timeout=8)
         if r.status_code == 200: return Image.open(BytesIO(r.content))
     except: pass
     return None
 
-# --- 1. GEOCODING ---
-def get_coordinates(city_name, api_key):
-    if not api_key: return None, None
-    try:
-        url = f"http://api.openweathermap.org/geo/1.0/direct?q={city_name}&limit=1&appid={api_key}"
-        data = requests.get(url).json()
-        if data: return data[0]['lat'], data[0]['lon']
-    except: pass
-    return None, None
-
-# --- 2. NASA SCIENTIFIC LAYERS ---
+# --- 2. NASA LAYER FETCHER (The Function You Were Missing) ---
 def get_nasa_layer(layer_type, lat, lon):
     today = datetime.datetime.utcnow().strftime("%Y-%m-%d")
     bbox = f"{lon-10},{lat-10},{lon+10},{lat+10}" 
     
+    # Select Satellite based on region
     if -140 < lon < -30: sat = "GOES-East_ABI_Band02_Red_Visible_1km"
     elif -30 <= lon < 60: sat = "Meteosat_MSG_SEVIRI_Band03_Visible"
     else: sat = "Himawari_AHI_Band3_Red_Visible_1km"
 
+    # Map user selection to NASA Layer IDs
     layer_map = {
         "Visual": sat,
-        "Precipitation": "GPM_3IMERGHH_06_Precipitation",
+        "Precipitation": "GPM_3IMERGHH_06_Precipitation", 
         "Thermal": "MODIS_Terra_Land_Surface_Temperature_Day",
         "Night": "VIIRS_SNPP_DayNightBand_At_Sensor_Radiance",
     }
@@ -80,11 +69,21 @@ def get_nasa_layer(layer_type, lat, lon):
     
     try:
         full_url = requests.Request('GET', url, params=params).prepare().url
-        # Return the image object AND the url source
+        # Return both image AND url
         return load_image_from_url(full_url), full_url
     except: return None, None
 
-# --- 3. TELEMETRY ---
+# --- 3. GEOCODING ---
+def get_coordinates(city_name, api_key):
+    if not api_key: return None, None
+    try:
+        url = f"http://api.openweathermap.org/geo/1.0/direct?q={city_name}&limit=1&appid={api_key}"
+        data = requests.get(url).json()
+        if data: return data[0]['lat'], data[0]['lon']
+    except: pass
+    return None, None
+
+# --- 4. TELEMETRY ---
 def get_weather_telemetry(lat, lon, key):
     if not key: return None
     try:
@@ -122,6 +121,7 @@ with st.sidebar:
 
     lat, lon = st.session_state['lat'], st.session_state['lon']
     
+    # Interactive Map
     m = folium.Map(location=[lat, lon], zoom_start=5)
     m.add_child(folium.LatLngPopup()) 
     map_data = st_folium(m, height=200, width=280)
@@ -165,11 +165,114 @@ with tab2:
     
     col_visual, col_data = st.columns([2, 1])
     
+    # LEFT: NASA LAYERS
     with col_visual:
         st.subheader("A. Earth Science Data (NASA GIBS)")
         layer_opt = st.selectbox("Select Instrument:", ["Visual (Cloud Texture)", "Precipitation (Rain Radar)", "Thermal (Heat)", "Night Vision"])
         
-        layer_map = {"Visual": "Visual", "Precipitation": "Precipitation", "Thermal": "Thermal", "Night": "Night"}
+        # Map user selection to simple keys
+        layer_keys = {"Visual": "Visual", "Precipitation": "Precipitation", "Thermal": "Thermal", "Night": "Night"}
         
         with st.spinner("Downlinking..."):
-            img, url = get
+            # CALL THE FUNCTION THAT WAS MISSING
+            img, url = get_nasa_layer(layer_keys[layer_opt.split()[0]], lat, lon)
+            
+            if img:
+                st.image(img, caption=f"Source: NASA GIBS | {layer_opt}", use_column_width=True)
+                # Save images for AI
+                if "Visual" in layer_opt: st.session_state['ai_main'] = img
+                if "Precipitation" in layer_opt: st.session_state['ai_radar'] = img
+            else:
+                st.warning("Layer unavailable. Using Backup.")
+                backup = "https://upload.wikimedia.org/wikipedia/commons/thumb/5/5e/Cumulonimbus_cloud_over_Singapore.jpg/800px-Cumulonimbus_cloud_over_Singapore.jpg"
+                st.session_state['ai_main'] = load_image_from_url(backup)
+                st.image(st.session_state['ai_main'], caption="Archive Backup")
+
+    # RIGHT: TELEMETRY
+    with col_data:
+        st.subheader("B. Local Telemetry")
+        w = get_weather_telemetry(lat, lon, weather_key)
+        
+        if w:
+            st.metric("Relative Humidity", f"{w['main']['humidity']}%", "Target > 40%")
+            st.metric("Temperature", f"{w['main']['temp']}°C")
+            st.metric("Pressure", f"{w['main']['pressure']} hPa")
+            
+            st.session_state['ai_humid'] = w['main']['humidity']
+            st.session_state['ai_press'] = w['main']['pressure']
+            
+            if w['main']['humidity'] > 40:
+                st.success("✅ Conditions: SEEDABLE")
+            else:
+                st.error("⚠️ Conditions: TOO DRY")
+        else:
+            st.warning("Enter OpenWeatherMap Key.")
+            st.session_state['ai_humid'] = "N/A"
+            st.session_state['ai_press'] = "N/A"
+
+# TAB 3: GEMINI FUSION
+with tab3:
+    st.header("3. Gemini Fusion Engine")
+    
+    if st.button("RUN DEEP DIAGNOSTICS", type="primary"):
+        if not api_key:
+            st.error("🔑 API Key Missing!")
+        else:
+            # Ensure we have at least one image
+            if 'ai_main' not in st.session_state:
+                st.session_state['ai_main'], _ = get_nasa_layer("Visual", lat, lon)
+                if not st.session_state['ai_main']:
+                     st.session_state['ai_main'] = load_image_from_url("https://upload.wikimedia.org/wikipedia/commons/thumb/5/5e/Cumulonimbus_cloud_over_Singapore.jpg/800px-Cumulonimbus_cloud_over_Singapore.jpg")
+
+            # Display what Gemini sees
+            st.markdown("### 👁️ AI Input Stream")
+            c1, c2 = st.columns(2)
+            if st.session_state.get('ai_main'): 
+                c1.image(st.session_state['ai_main'], caption="1. Visual Satellite", use_column_width=True)
+            if st.session_state.get('ai_radar'): 
+                c2.image(st.session_state['ai_radar'], caption="2. Precipitation Radar", use_column_width=True)
+
+            # Execute AI
+            genai.configure(api_key=api_key)
+            try:
+                model = genai.GenerativeModel('gemini-2.0-flash')
+            except:
+                model = genai.GenerativeModel('gemini-1.5-flash')
+            
+            prompt = f"""
+            ACT AS A LEAD METEOROLOGIST. Analyze this Multi-Modal Sensor Data.
+            
+            --- MISSION CONTEXT ---
+            Location: {target_name} ({lat}, {lon})
+            Objective: Hygroscopic Seeding.
+            
+            --- TELEMETRY ---
+            - Humidity: {st.session_state.get('ai_humid')}%
+            - Pressure: {st.session_state.get('ai_press')} hPa
+            
+            --- VISUALS ---
+            1. VISUAL SATELLITE: Cloud Texture.
+            2. PRECIPITATION RADAR: Rain Intensity (Colors).
+            
+            --- TASK ---
+            1. Describe Cloud Structure.
+            2. Check Radar for active rain.
+            3. DECISION: **GO** or **NO-GO**?
+            4. REASONING: Scientific justification.
+            """
+            
+            inputs = [prompt, st.session_state['ai_main']]
+            if st.session_state.get('ai_radar'): inputs.append(st.session_state['ai_radar'])
+            
+            with st.spinner("Gemini 2.0 is fusing streams..."):
+                try:
+                    res = model.generate_content(inputs)
+                    st.markdown("### 🛰️ Mission Report")
+                    st.write(res.text)
+                    if "GO" in res.text.upper() and "NO-GO" not in res.text.upper():
+                        st.success("✅ MISSION APPROVED")
+                        st.balloons()
+                    elif "NO-GO" in res.text.upper():
+                        st.error("⛔ MISSION ABORTED")
+                except Exception as e:
+                    st.error(f"AI Error: {e}")
