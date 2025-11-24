@@ -1,6 +1,7 @@
 streamlit
 google-generativeai
-Pillow
+pillow
 requests
-folium
-streamlit-folium
+numpy
+matplotlib
+scipy
