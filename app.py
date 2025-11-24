@@ -11,6 +11,7 @@ import math
 import time
 
 # --- CONFIGURATION ---
+# Leave empty for GitHub security (User pastes in Sidebar)
 DEFAULT_API_KEY = "" 
 WEATHER_API_KEY = "11b260a4212d29eaccbd9754da459059" 
 
@@ -32,18 +33,15 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# --- ROBUST IMAGE LOADER (With Fail-Safe) ---
+# --- ROBUST IMAGE LOADER (Prevents 502/AttributeError) ---
 def load_image_from_url(url):
     try:
+        # Mimic a real browser to avoid 403 Forbidden errors
         headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
-        r = requests.get(url, headers=headers, timeout=5)
+        r = requests.get(url, headers=headers, timeout=8)
         if r.status_code == 200: return Image.open(BytesIO(r.content))
     except: pass
     return None
-
-def create_placeholder_image():
-    """Generates a grey square if internet fails completely"""
-    return Image.new('RGB', (200, 200), color='#2d2d2d')
 
 # --- 1. GEOCODING ---
 def get_coordinates(city_name, api_key):
@@ -68,7 +66,7 @@ def get_nasa_layer(layer_type, lat, lon):
     # Map user selection to NASA Layer IDs
     layer_map = {
         "Visual": sat,
-        "Precipitation": "GPM_3IMERGHH_06_Precipitation", 
+        "Precipitation": "GPM_3IMERGHH_06_Precipitation", # The Rain Layer
         "Thermal": "MODIS_Terra_Land_Surface_Temperature_Day",
         "Night": "VIIRS_SNPP_DayNightBand_At_Sensor_Radiance",
     }
@@ -111,6 +109,7 @@ with st.sidebar:
     if 'lat' not in st.session_state: st.session_state['lat'] = 21.5433
     if 'lon' not in st.session_state: st.session_state['lon'] = 39.1728
 
+    # Search Button
     if st.button("Find Location"):
         if weather_key:
             new_lat, new_lon = get_coordinates(target_name, weather_key)
@@ -131,6 +130,7 @@ with st.sidebar:
     m.add_child(folium.LatLngPopup()) 
     map_data = st_folium(m, height=200, width=280)
 
+    # Update on Map Click
     if map_data['last_clicked']:
         st.session_state['lat'] = map_data['last_clicked']['lat']
         st.session_state['lon'] = map_data['last_clicked']['lng']
@@ -183,22 +183,15 @@ with tab2:
             
             if img:
                 st.image(img, caption=f"Source: NASA GIBS | {layer_opt}", use_column_width=True)
-                # Save MAIN image for AI
+                # Save MAIN image for AI if it's Visual or Radar
                 if "Visual" in layer_opt: st.session_state['ai_main'] = img
                 if "Precipitation" in layer_opt: st.session_state['ai_radar'] = img
             else:
-                st.warning("Layer unavailable. Using Backup.")
-                # CRASH PROOF BACKUP
-                backup_url = "https://upload.wikimedia.org/wikipedia/commons/thumb/5/5e/Cumulonimbus_cloud_over_Singapore.jpg/800px-Cumulonimbus_cloud_over_Singapore.jpg"
-                backup_img = load_image_from_url(backup_url)
-                
-                if backup_img:
-                    st.session_state['ai_main'] = backup_img
-                    st.image(backup_img, caption="Archive Backup", use_column_width=True)
-                else:
-                    # ULTIMATE FAILSAFE (Grey Square)
-                    st.session_state['ai_main'] = create_placeholder_image()
-                    st.image(st.session_state['ai_main'], caption="System Offline (Simulated)", use_column_width=True)
+                st.warning("Layer unavailable for this region/time. Using Backup.")
+                # Crash-Proof Backup
+                backup = "https://upload.wikimedia.org/wikipedia/commons/thumb/5/5e/Cumulonimbus_cloud_over_Singapore.jpg/800px-Cumulonimbus_cloud_over_Singapore.jpg"
+                st.session_state['ai_main'] = load_image_from_url(backup)
+                st.image(st.session_state['ai_main'], caption="Archive Backup")
 
     # RIGHT: OPENWEATHERMAP
     with col_data:
@@ -231,23 +224,25 @@ with tab3:
             st.error("🔑 API Key Missing!")
         else:
             # ENSURE ASSETS EXIST
-            if 'ai_main' not in st.session_state or st.session_state['ai_main'] is None:
-                st.warning("Initializing Image Stream...")
-                # Force fetch a fallback
-                st.session_state['ai_main'] = create_placeholder_image()
+            if 'ai_main' not in st.session_state:
+                # Force fetch if user skipped Tab 2
+                st.session_state['ai_main'], _ = get_nasa_layer("Visual", lat, lon)
+                # Double check if fetch worked, if not load backup
+                if not st.session_state['ai_main']:
+                     st.session_state['ai_main'] = load_image_from_url("https://upload.wikimedia.org/wikipedia/commons/thumb/5/5e/Cumulonimbus_cloud_over_Singapore.jpg/800px-Cumulonimbus_cloud_over_Singapore.jpg")
 
             # DISPLAY WHAT AI SEES
             st.markdown("### 👁️ AI Input Stream")
             c1, c2 = st.columns(2)
             
-            # Only show if valid
+            # Robust Display: Only show if not None
             if st.session_state.get('ai_main'): 
                 c1.image(st.session_state['ai_main'], caption="1. Visual Satellite", use_column_width=True)
             
             if st.session_state.get('ai_radar'): 
                 c2.image(st.session_state['ai_radar'], caption="2. Precipitation Radar", use_column_width=True)
             else:
-                c2.info("No Radar Data Loaded")
+                c2.info("Radar data not loaded (Select 'Precipitation' in Tab 2 to include)")
 
             # EXECUTE AI
             genai.configure(api_key=api_key)
@@ -256,29 +251,30 @@ with tab3:
             except:
                 model = genai.GenerativeModel('gemini-1.5-flash')
             
+            # THE SUPER PROMPT
             prompt = f"""
-            ACT AS A LEAD METEOROLOGIST. Analyze this Multi-Modal Sensor Data.
+            ACT AS A LEAD METEOROLOGIST for the Saudi Regional Cloud Seeding Program.
+            Analyze this Multi-Modal Sensor Data to authorize a mission.
             
             --- MISSION CONTEXT ---
             Location: {target_name} ({lat}, {lon})
-            Objective: Hygroscopic Seeding.
+            Objective: Hygroscopic Seeding (Salt Flares).
             
-            --- TELEMETRY ---
+            --- NUMERICAL TELEMETRY ---
             - Humidity: {st.session_state.get('ai_humid')}%
             - Pressure: {st.session_state.get('ai_press')} hPa
             
-            --- VISUALS ---
-            1. VISUAL SATELLITE: Cloud Texture.
-            2. PRECIPITATION RADAR: Rain Intensity (Colors).
+            --- VISUAL DATA (Attached) ---
+            Image 1: SATELLITE. Look for "Convective Towers" (lumpy texture) vs "Stratiform" (flat haze).
+            Image 2: RADAR (Optional). Colored pixels = Active Rain.
             
             --- TASK ---
-            1. Describe Cloud Structure.
-            2. Check Radar for active rain.
+            1. VISUAL OBSERVATION: Describe the cloud morphology in Image 1.
+            2. THERMODYNAMIC CHECK: Is humidity sufficient (>40%)?
             3. DECISION: **GO** or **NO-GO**?
-            4. REASONING: Scientific justification.
+            4. REASONING: Scientific justification using terms like 'Updrafts', 'Nucleation', and 'Coalescence'.
             """
             
-            # Safe Input List
             inputs = [prompt]
             if st.session_state.get('ai_main'): inputs.append(st.session_state['ai_main'])
             if st.session_state.get('ai_radar'): inputs.append(st.session_state['ai_radar'])
@@ -286,13 +282,13 @@ with tab3:
             with st.spinner("Gemini 2.0 is fusing streams..."):
                 try:
                     res = model.generate_content(inputs)
-                    st.markdown("### 🛰️ Mission Report")
+                    st.markdown("### 🛰️ Mission Command Report")
                     st.write(res.text)
                     
                     if "GO" in res.text.upper() and "NO-GO" not in res.text.upper():
-                        st.success("✅ MISSION APPROVED")
+                        st.success("✅ MISSION APPROVED: Conditions Optimal.")
                         st.balloons()
                     elif "NO-GO" in res.text.upper():
-                        st.error("⛔ MISSION ABORTED")
+                        st.error("⛔ MISSION ABORTED: Conditions Unsuitable.")
                 except Exception as e:
                     st.error(f"AI Error: {e}")
