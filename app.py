@@ -3,197 +3,206 @@ import google.generativeai as genai
 from PIL import Image
 import requests
 import datetime
-import io
-import random
-import numpy as np
-import matplotlib.pyplot as plt
-from scipy.ndimage import gaussian_filter
+from io import BytesIO
+import urllib.parse
 
 # --- CONFIGURATION ---
-DEFAULT_API_KEY = "" # Paste your Google AI Key here
-WEATHER_API_KEY = "11b260a4212d29eaccbd9754da459059" # Not needed for simulation mode
+# Paste your keys here or use the Sidebar
+DEFAULT_API_KEY = "" 
+WEATHER_API_KEY = "11b260a4212d29eaccbd9754da459059" 
+SCREENSHOT_API_KEY = "f9ededa86ff343819371871884196288" # Get this from https://apiflash.com (Free)
 
-st.set_page_config(page_title="VisionRain Simulation Core", layout="wide", page_icon="⛈️")
+st.set_page_config(page_title="VisionRain AI Agent", layout="wide", page_icon="👁️")
 
 # --- STYLING ---
 st.markdown("""
     <style>
     .stApp {background-color: #0e1117;}
-    .stMetric {background-color: #1f2937; border: 1px solid #374151; border-radius: 8px;}
     h1, h2, h3 {color: #4facfe;}
+    .agent-badge {background-color: #ff4b4b; color: white; padding: 2px 8px; border-radius: 4px; font-size: 10px;}
     </style>
     """, unsafe_allow_html=True)
 
-# --- 1. PROCEDURAL RADAR GENERATOR (The "AI" Generator) ---
-def generate_synthetic_radar(intensity="Heavy"):
-    """Mathematically generates a realistic weather radar map."""
-    size = 200
-    data = np.zeros((size, size))
+# --- 1. THE VISUAL AGENT (Captures Real Websites) ---
+def get_website_screenshot(url, api_key):
+    """
+    Uses a Headless Browser Agent to visit a URL, wait for render, and take a photo.
+    """
+    if not api_key: return None
     
-    if intensity == "Clear":
-        num_blobs = 0
-    elif intensity == "Light":
-        num_blobs = 5
-    else: # Heavy
-        num_blobs = 15
-
-    for _ in range(num_blobs):
-        x, y = random.randint(0, size), random.randint(0, size)
-        data[x, y] = random.uniform(0.5, 1.0) * 100 # Seed points
-
-    radar_data = gaussian_filter(data, sigma=random.randint(5, 15))
-    radar_data = radar_data / np.max(radar_data) if np.max(radar_data) > 0 else radar_data
-    
-    fig, ax = plt.subplots(figsize=(5, 5), dpi=100)
-    ax.set_facecolor('black')
-    ax.imshow(np.zeros((size, size)), cmap='gray', vmin=0, vmax=1) 
-    
-    masked_data = np.ma.masked_where(radar_data < 0.1, radar_data)
-    ax.imshow(masked_data, cmap='jet', alpha=0.8, vmin=0, vmax=0.8)
-    
-    ax.grid(color='white', linestyle='--', linewidth=0.5, alpha=0.3)
-    ax.axis('off')
-    
-    buf = io.BytesIO()
-    plt.savefig(buf, format='png', bbox_inches='tight', pad_inches=0, facecolor='black')
-    buf.seek(0)
-    plt.close(fig) # Close plot to free memory
-    return Image.open(buf)
-
-# --- 2. SATELLITE ROTATOR (Simulated Live Feed) ---
-def get_simulated_satellite():
-    """Rotates between high-quality NASA images to simulate a live feed"""
-    urls = [
-        "https://upload.wikimedia.org/wikipedia/commons/thumb/5/5e/Cumulonimbus_cloud_over_Singapore.jpg/800px-Cumulonimbus_cloud_over_Singapore.jpg",
-        "https://eoimages.gsfc.nasa.gov/images/imagerecords/85000/85423/cumulonimbus_tmo_2008036_lrg.jpg", 
-        "https://upload.wikimedia.org/wikipedia/commons/thumb/0/04/Hurricane_Isabel_from_ISS.jpg/800px-Hurricane_Isabel_from_ISS.jpg"
-    ]
-    idx = int(datetime.datetime.now().minute / 20) % len(urls) 
+    # ApiFlash parameters to ensure Windy loads correctly
+    params = {
+        'access_key': api_key,
+        'url': url,
+        'format': 'jpeg',
+        'width': 1024,
+        'height': 768,
+        'delay': 3, # Wait 3 seconds for Windy animation to load
+        'quality': 80
+    }
     
     try:
-        headers = {'User-Agent': 'Mozilla/5.0'}
-        r = requests.get(urls[idx], headers=headers, timeout=5)
-        return Image.open(io.BytesIO(r.content))
-    except:
-        return generate_synthetic_radar("Clear")
+        query = urllib.parse.urlencode(params)
+        api_url = f"https://api.apiflash.com/v1/urltoimage?{query}"
+        r = requests.get(api_url, timeout=15)
+        if r.status_code == 200:
+            return Image.open(BytesIO(r.content))
+    except: pass
+    return None
 
-# --- 3. TELEMETRY SIMULATOR ---
-def get_simulated_telemetry(scenario):
-    if scenario == "Heavy Storm":
-        return {"humidity": 85, "temp": 22, "pressure": 998, "wind": 25}
-    elif scenario == "Light Rain":
-        return {"humidity": 60, "temp": 28, "pressure": 1012, "wind": 12}
-    else: # Clear
-        return {"humidity": 25, "temp": 35, "pressure": 1020, "wind": 5}
+# --- 2. WINDY URL GENERATOR ---
+def get_windy_url(lat, lon, layer):
+    """Generates the specific Windy.com URL for a location and layer"""
+    # Layer map: 'radar' -> 'radar', 'satellite' -> 'satellite', etc.
+    # Windy URL format: https://www.windy.com/LAT/LON?LAYER,LAT,LON,ZOOM
+    return f"https://www.windy.com/{lat}/{lon}?{layer},{lat},{lon},6"
+
+# --- 3. TELEMETRY (Numerical Truth) ---
+def get_telemetry(lat, lon, key):
+    if not key: return None
+    try:
+        url = f"https://api.openweathermap.org/data/2.5/weather?lat={lat}&lon={lon}&appid={key}&units=metric"
+        return requests.get(url).json()
+    except: return None
+
+# --- 4. GEOCODING ---
+def get_coordinates(city_name, api_key):
+    if not api_key: return None, None
+    try:
+        url = f"http://api.openweathermap.org/geo/1.0/direct?q={city_name}&limit=1&appid={api_key}"
+        data = requests.get(url).json()
+        if data: return data[0]['lat'], data[0]['lon']
+    except: pass
+    return None, None
 
 # --- SIDEBAR ---
 with st.sidebar:
-    st.image("https://cdn-icons-png.flaticon.com/512/414/414927.png", width=80)
     st.title("VisionRain")
-    st.caption("System Status: **ONLINE (SIMULATION MODE)**")
+    st.caption("Autonomous Visual Agent")
     
     api_key = st.text_input("Google AI Key", value=DEFAULT_API_KEY, type="password")
+    weather_key = st.text_input("OpenWeather Key", value=WEATHER_API_KEY, type="password")
+    screen_key = st.text_input("Screenshot API Key", value=SCREENSHOT_API_KEY, type="password", help="Get free key from apiflash.com")
     
-    st.markdown("---")
-    st.markdown("### 🎛️ Simulation Controller")
-    scenario = st.selectbox("Inject Weather Pattern:", ["Heavy Storm", "Light Rain", "Clear Sky"])
-    
+    st.markdown("### 📍 Target Selector")
     target_name = st.text_input("Region Name", "Jeddah")
-    st.success(f"Tracking: {target_name}")
-
-# --- MAIN DASHBOARD ---
-st.title("VisionRain Command Center")
-dt_now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S UTC")
-st.markdown(f"### *Live Downlink: {dt_now}*")
-
-# --- THE FIX: GENERATE AND LOCK DATA INTO SESSION STATE ---
-# This ensures the exact images generated here are available in all tabs
-with st.spinner("Calibrating Sensors & Generating Imagery..."):
-    radar_img_gen = generate_synthetic_radar(intensity="Heavy" if scenario == "Heavy Storm" else "Light" if scenario == "Light Rain" else "Clear")
-    sat_img_gen = get_simulated_satellite()
-    telem_gen = get_simulated_telemetry(scenario)
     
-    # Lock into session state
-    st.session_state['sim_radar'] = radar_img_gen
-    st.session_state['sim_sat'] = sat_img_gen
-    st.session_state['sim_telem'] = telem_gen
+    if 'lat' not in st.session_state: st.session_state['lat'] = 21.5433
+    if 'lon' not in st.session_state: st.session_state['lon'] = 39.1728
 
+    if st.button("Find Location"):
+        if weather_key:
+            new_lat, new_lon = get_coordinates(target_name, weather_key)
+            if new_lat:
+                st.session_state['lat'] = new_lat
+                st.session_state['lon'] = new_lon
+                st.rerun()
 
-tab1, tab2 = st.tabs(["📡 Live Sensor Array", "🧠 Gemini Fusion Core"])
+    lat, lon = st.session_state['lat'], st.session_state['lon']
+    st.info(f"Locked: {lat:.4f}, {lon:.4f}")
 
-# TAB 1: SENSOR ARRAY (Uses locked data)
+# --- MAIN UI ---
+st.title("VisionRain Agent Interface")
+st.markdown(f"### *Targeting Sector: {target_name}*")
+
+tab1, tab2 = st.tabs(["👁️ Live Visual Intelligence", "🧠 Gemini Fusion Core"])
+
+# TAB 1: VISUAL AGENT
 with tab1:
-    col_vis, col_dat = st.columns([2, 1])
+    st.header("1. Autonomous Visual Reconnaissance")
     
-    with col_vis:
-        st.subheader("A. Multi-Spectral Visuals")
-        c1, c2 = st.columns(2)
-        # Use data from session state
-        c1.image(st.session_state['sim_sat'], caption="Optical Satellite (NASA VIIRS)", use_column_width=True)
-        c2.image(st.session_state['sim_radar'], caption="Doppler Radar (Reflectivity)", use_column_width=True)
+    col_ctrl, col_view = st.columns([1, 2])
+    
+    with col_ctrl:
+        st.markdown("**Select Target Layer:**")
+        layer = st.selectbox("Instrument", ["radar", "satellite", "rain", "wind", "clouds", "temp"])
         
-    with col_dat:
-        st.subheader("B. Telemetry")
-        t = st.session_state['sim_telem']
-        st.metric("Humidity", f"{t['humidity']}%", "Target > 40%")
-        st.metric("Temperature", f"{t['temp']}°C")
-        st.metric("Pressure", f"{t['pressure']} hPa")
-        st.metric("Wind Speed", f"{t['wind']} m/s")
+        st.info("Click below to dispatch the Visual Agent to Windy.com and capture live intelligence.")
         
-        if t['humidity'] > 40:
-            st.success("✅ SEEDABLE")
-        else:
-            st.error("⚠️ TOO DRY")
+        if st.button("📸 CAPTURE LIVE SITE"):
+            if not screen_key:
+                st.error("Need Screenshot API Key!")
+            else:
+                with st.spinner(f"Agent browsing Windy.com for {layer}..."):
+                    target_url = get_windy_url(lat, lon, layer)
+                    img = get_website_screenshot(target_url, screen_key)
+                    
+                    if img:
+                        st.session_state[f'img_{layer}'] = img
+                        st.success("Capture Successful")
+                    else:
+                        st.error("Agent Timeout. Check API Key.")
 
-# TAB 2: GEMINI AI (Uses the EXACT SAME locked data)
+    with col_view:
+        # Display whatever we captured
+        if st.session_state.get(f'img_{layer}'):
+            st.image(st.session_state[f'img_{layer}'], caption=f"Live Agent Capture: {layer.upper()}", use_column_width=True)
+        else:
+            st.markdown(f"""
+            <div style="height:400px; border:2px dashed #333; display:flex; align-items:center; justify-content:center; color:#555;">
+                NO VISUAL DATA FOR {layer.upper()}
+            </div>
+            """, unsafe_allow_html=True)
+
+# TAB 2: GEMINI FUSION
 with tab2:
-    st.header("2. Gemini Fusion Engine")
+    st.header("2. Multi-Modal Decision Core")
     
-    if st.button("RUN LIVE DIAGNOSTICS", type="primary"):
+    # Telemetry
+    w = get_telemetry(lat, lon, weather_key)
+    if w:
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Humidity", f"{w['main']['humidity']}%")
+        c2.metric("Pressure", f"{w['main']['pressure']} hPa")
+        c3.metric("Wind", f"{w['wind']['speed']} m/s")
+    
+    st.divider()
+    
+    if st.button("RUN FULL MISSION DIAGNOSTICS", type="primary"):
         if not api_key:
             st.error("🔑 API Key Missing!")
         else:
-            # Display what AI sees (using session state data)
-            st.markdown("### 👁️ AI Input Stream Verification")
-            c1, c2 = st.columns(2)
-            c1.image(st.session_state['sim_sat'], caption="Input 1: Visual Satellite", use_column_width=True)
-            c2.image(st.session_state['sim_radar'], caption="Input 2: Doppler Radar", use_column_width=True)
+            # Check what images we have
+            available_images = []
+            for l in ["radar", "satellite", "rain", "wind", "clouds"]:
+                if st.session_state.get(f'img_{l}'):
+                    available_images.append(st.session_state[f'img_{l}'])
             
-            genai.configure(api_key=api_key)
-            try:
-                model = genai.GenerativeModel('gemini-2.0-flash')
-            except:
-                model = genai.GenerativeModel('gemini-1.5-flash')
-            
-            prompt = f"""
-            ACT AS A LEAD METEOROLOGIST. Analyze this Live Sensor Data for Cloud Seeding.
-            
-            --- TELEMETRY ---
-            - Humidity: {st.session_state['sim_telem']['humidity']}%
-            - Pressure: {st.session_state['sim_telem']['pressure']} hPa
-            
-            --- VISUALS (Attached below) ---
-            Image 1: Optical Satellite.
-            Image 2: Doppler Radar (Generated Heatmap: Red/Yellow=Heavy Rain, Blue/Green=Light, Black=Clear).
-            
-            --- TASK ---
-            1. RADAR ANALYSIS: Look at Image 2. Describe the intensity and coverage of precipitation blobs.
-            2. CORRELATION: Does the humidity level align with the radar visuals?
-            3. DECISION: **GO** or **NO-GO** for Seeding?
-            4. REASONING: Scientific justification based on the provided images and data.
-            """
-            
-            with st.spinner("Gemini 2.0 is fusing streams..."):
+            if not available_images:
+                st.warning("⚠️ No visual evidence captured yet! Go to Tab 1 and capture at least one layer.")
+            else:
+                # Display what AI sees
+                st.write(f"Analyzing {len(available_images)} visual inputs + Telemetry...")
+                st.image(available_images, width=200, caption=["Input"] * len(available_images))
+                
+                genai.configure(api_key=api_key)
                 try:
-                    # PASS THE LOCKED IMAGES TO GEMINI
-                    res = model.generate_content([prompt, st.session_state['sim_sat'], st.session_state['sim_radar']])
-                    st.markdown("### 🛰️ Mission Report")
-                    st.write(res.text)
-                    
-                    if "GO" in res.text.upper() and "NO-GO" not in res.text.upper():
-                        st.balloons()
-                        st.success("✅ MISSION APPROVED")
-                    elif "NO-GO" in res.text.upper():
-                        st.error("⛔ MISSION ABORTED")
-                except Exception as e:
-                    st.error(f"AI Error: {e}")
+                    model = genai.GenerativeModel('gemini-2.0-flash')
+                except:
+                    model = genai.GenerativeModel('gemini-1.5-flash')
+                
+                prompt = f"""
+                ACT AS A LEAD METEOROLOGIST.
+                Analyze these WEBSITE SCREENSHOTS from Windy.com and the Telemetry.
+                
+                --- CONTEXT ---
+                Location: {target_name} ({lat}, {lon})
+                Telemetry: Humidity {w['main']['humidity'] if w else 'N/A'}%
+                
+                --- TASK ---
+                1. Look at the screenshots. Describe the weather patterns (colors, swirls, density).
+                2. Note: Windy.com uses RED/YELLOW for intense rain/wind, WHITE for clouds.
+                3. Correlate visual intensity with the humidity number.
+                4. DECISION: **GO** or **NO-GO** for Cloud Seeding?
+                """
+                
+                inputs = [prompt] + available_images
+                
+                with st.spinner("Gemini is analyzing website visuals..."):
+                    try:
+                        res = model.generate_content(inputs)
+                        st.markdown("### 🤖 Mission Report")
+                        st.write(res.text)
+                        if "GO" in res.text.upper(): st.balloons()
+                    except Exception as e:
+                        st.error(f"AI Error: {e}")
