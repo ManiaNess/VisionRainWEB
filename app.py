@@ -5,67 +5,66 @@ import requests
 import datetime
 from io import BytesIO
 import urllib.parse
+import time
 
 # --- CONFIGURATION ---
-# Paste your keys here or use the Sidebar
+# Paste your keys here or keep them blank to use the sidebar
 DEFAULT_API_KEY = "" 
-WEATHER_API_KEY = "11b260a4212d29eaccbd9754da459059" 
-SCREENSHOT_API_KEY = "f9ededa86ff343819371871884196288" # Get this from https://apiflash.com (Free)
+WEATHER_API_KEY = "" 
+SCREENSHOT_API_KEY = "" # Get this from apiflash.com
 
-st.set_page_config(page_title="VisionRain AI Agent", layout="wide", page_icon="👁️")
+st.set_page_config(page_title="VisionRain Visual Agent", layout="wide", page_icon="👁️")
 
 # --- STYLING ---
 st.markdown("""
     <style>
     .stApp {background-color: #0e1117;}
+    .stMetric {background-color: #1f2937; border: 1px solid #374151; border-radius: 8px;}
     h1, h2, h3 {color: #4facfe;}
-    .agent-badge {background-color: #ff4b4b; color: white; padding: 2px 8px; border-radius: 4px; font-size: 10px;}
     </style>
     """, unsafe_allow_html=True)
 
-# --- 1. THE VISUAL AGENT (Captures Real Websites) ---
-def get_website_screenshot(url, api_key):
+# --- 1. THE VISUAL AGENT (ApiFlash) ---
+def get_windy_screenshot(lat, lon, layer, api_key):
     """
-    Uses a Headless Browser Agent to visit a URL, wait for render, and take a photo.
+    Spins up a Headless Chrome browser in the cloud to photograph Windy.com.
     """
     if not api_key: return None
     
-    # ApiFlash parameters to ensure Windy loads correctly
+    # We use the 'Embed' version of Windy because it has less UI clutter (buttons/menus)
+    # This makes it easier for Gemini to read the actual weather data.
+    windy_url = f"https://embed.windy.com/embed2.html?lat={lat}&lon={lon}&detailLat={lat}&detailLon={lon}&width=1000&height=600&zoom=6&level=surface&overlay={layer}&product=ecmwf&menu=&message=&marker=&calendar=now&pressure=&type=map&location=coordinates&detail=&metricWind=default&metricTemp=default&radarRange=-1"
+    
     params = {
         'access_key': api_key,
-        'url': url,
+        'url': windy_url,
         'format': 'jpeg',
-        'width': 1024,
-        'height': 768,
-        'delay': 3, # Wait 3 seconds for Windy animation to load
-        'quality': 80
+        'width': 1000,
+        'height': 600,
+        'delay': 4,   # CRITICAL: Wait 4 seconds for the animation to load/spin up
+        'quality': 90,
+        'no_cookie_banners': 'true',
+        'no_ads': 'true'
     }
     
     try:
         query = urllib.parse.urlencode(params)
-        api_url = f"https://api.apiflash.com/v1/urltoimage?{query}"
-        r = requests.get(api_url, timeout=15)
+        # The actual API call that takes the photo
+        r = requests.get(f"https://api.apiflash.com/v1/urltoimage?{query}", timeout=20)
         if r.status_code == 200:
             return Image.open(BytesIO(r.content))
     except: pass
     return None
 
-# --- 2. WINDY URL GENERATOR ---
-def get_windy_url(lat, lon, layer):
-    """Generates the specific Windy.com URL for a location and layer"""
-    # Layer map: 'radar' -> 'radar', 'satellite' -> 'satellite', etc.
-    # Windy URL format: https://www.windy.com/LAT/LON?LAYER,LAT,LON,ZOOM
-    return f"https://www.windy.com/{lat}/{lon}?{layer},{lat},{lon},6"
-
-# --- 3. TELEMETRY (Numerical Truth) ---
-def get_telemetry(lat, lon, key):
+# --- 2. TELEMETRY ---
+def get_weather_telemetry(lat, lon, key):
     if not key: return None
     try:
         url = f"https://api.openweathermap.org/data/2.5/weather?lat={lat}&lon={lon}&appid={key}&units=metric"
         return requests.get(url).json()
     except: return None
 
-# --- 4. GEOCODING ---
+# --- 3. GEOCODING ---
 def get_coordinates(city_name, api_key):
     if not api_key: return None, None
     try:
@@ -82,7 +81,7 @@ with st.sidebar:
     
     api_key = st.text_input("Google AI Key", value=DEFAULT_API_KEY, type="password")
     weather_key = st.text_input("OpenWeather Key", value=WEATHER_API_KEY, type="password")
-    screen_key = st.text_input("Screenshot API Key", value=SCREENSHOT_API_KEY, type="password", help="Get free key from apiflash.com")
+    screen_key = st.text_input("Screenshot Key (ApiFlash)", value=SCREENSHOT_API_KEY, type="password")
     
     st.markdown("### 📍 Target Selector")
     target_name = st.text_input("Region Name", "Jeddah")
@@ -96,60 +95,66 @@ with st.sidebar:
             if new_lat:
                 st.session_state['lat'] = new_lat
                 st.session_state['lon'] = new_lon
+                st.success(f"Locked: {target_name}")
                 st.rerun()
+            else:
+                st.error("City not found.")
+        else:
+            st.warning("Need Weather Key to search!")
 
     lat, lon = st.session_state['lat'], st.session_state['lon']
-    st.info(f"Locked: {lat:.4f}, {lon:.4f}")
+    st.info(f"Coords: {lat:.4f}, {lon:.4f}")
 
-# --- MAIN UI ---
+# --- MAIN DASHBOARD ---
 st.title("VisionRain Agent Interface")
 st.markdown(f"### *Targeting Sector: {target_name}*")
 
-tab1, tab2 = st.tabs(["👁️ Live Visual Intelligence", "🧠 Gemini Fusion Core"])
+tab1, tab2 = st.tabs(["👁️ Visual Reconnaissance", "🧠 Gemini Fusion Core"])
 
-# TAB 1: VISUAL AGENT
+# TAB 1: THE VISUAL AGENT
 with tab1:
-    st.header("1. Autonomous Visual Reconnaissance")
+    st.header("1. Autonomous Visual Capture")
+    st.write("The system deploys a **Cloud Agent** to browse Windy.com and capture live intelligence.")
     
     col_ctrl, col_view = st.columns([1, 2])
     
     with col_ctrl:
-        st.markdown("**Select Target Layer:**")
-        layer = st.selectbox("Instrument", ["radar", "satellite", "rain", "wind", "clouds", "temp"])
+        st.info("Select layer to capture:")
+        # These are the exact layer names Windy uses
+        target_layer = st.selectbox("Instrument Layer", ["radar", "satellite", "rain", "wind", "clouds"])
         
-        st.info("Click below to dispatch the Visual Agent to Windy.com and capture live intelligence.")
-        
-        if st.button("📸 CAPTURE LIVE SITE"):
+        if st.button("📸 CAPTURE LAYER", type="primary"):
             if not screen_key:
-                st.error("Need Screenshot API Key!")
+                st.error("Missing ApiFlash Key!")
             else:
-                with st.spinner(f"Agent browsing Windy.com for {layer}..."):
-                    target_url = get_windy_url(lat, lon, layer)
-                    img = get_website_screenshot(target_url, screen_key)
+                with st.spinner(f"Agent browsing Windy for {target_layer}... (Wait 5s)"):
+                    # 1. Take the Screenshot
+                    img = get_windy_screenshot(lat, lon, target_layer, screen_key)
                     
                     if img:
-                        st.session_state[f'img_{layer}'] = img
-                        st.success("Capture Successful")
+                        # 2. Save it to Session State so Gemini can see it later
+                        st.session_state[f'img_{target_layer}'] = img
+                        st.success(f"Successfully captured {target_layer}!")
                     else:
-                        st.error("Agent Timeout. Check API Key.")
+                        st.error("Agent timed out. Try again.")
 
     with col_view:
-        # Display whatever we captured
-        if st.session_state.get(f'img_{layer}'):
-            st.image(st.session_state[f'img_{layer}'], caption=f"Live Agent Capture: {layer.upper()}", use_column_width=True)
+        # Display the captured image if it exists
+        if st.session_state.get(f'img_{target_layer}'):
+            st.image(st.session_state[f'img_{target_layer}'], caption=f"Agent Capture: {target_layer.upper()}", use_column_width=True)
         else:
-            st.markdown(f"""
-            <div style="height:400px; border:2px dashed #333; display:flex; align-items:center; justify-content:center; color:#555;">
-                NO VISUAL DATA FOR {layer.upper()}
-            </div>
+            st.markdown("""
+                <div style="height:300px; border:2px dashed #555; display:flex; align-items:center; justify-content:center; color:#888;">
+                    NO VISUAL DATA CAPTURED
+                </div>
             """, unsafe_allow_html=True)
 
 # TAB 2: GEMINI FUSION
 with tab2:
     st.header("2. Multi-Modal Decision Core")
     
-    # Telemetry
-    w = get_telemetry(lat, lon, weather_key)
+    # Get Telemetry for Context
+    w = get_weather_telemetry(lat, lon, weather_key)
     if w:
         c1, c2, c3 = st.columns(3)
         c1.metric("Humidity", f"{w['main']['humidity']}%")
@@ -162,19 +167,23 @@ with tab2:
         if not api_key:
             st.error("🔑 API Key Missing!")
         else:
-            # Check what images we have
-            available_images = []
+            # 1. COLLECT ALL CAPTURED IMAGES
+            evidence = []
+            layer_names = []
+            
             for l in ["radar", "satellite", "rain", "wind", "clouds"]:
                 if st.session_state.get(f'img_{l}'):
-                    available_images.append(st.session_state[f'img_{l}'])
+                    evidence.append(st.session_state[f'img_{l}'])
+                    layer_names.append(l.upper())
             
-            if not available_images:
-                st.warning("⚠️ No visual evidence captured yet! Go to Tab 1 and capture at least one layer.")
+            if not evidence:
+                st.error("⚠️ No visual evidence found! Please go to Tab 1 and capture at least one layer.")
             else:
-                # Display what AI sees
-                st.write(f"Analyzing {len(available_images)} visual inputs + Telemetry...")
-                st.image(available_images, width=200, caption=["Input"] * len(available_images))
+                # 2. SHOW WHAT AI IS SEEING
+                st.write(f"Gemini is analyzing {len(evidence)} visual inputs: {', '.join(layer_names)}")
+                st.image(evidence, width=200, caption=layer_names)
                 
+                # 3. RUN GEMINI
                 genai.configure(api_key=api_key)
                 try:
                     model = genai.GenerativeModel('gemini-2.0-flash')
@@ -183,22 +192,29 @@ with tab2:
                 
                 prompt = f"""
                 ACT AS A LEAD METEOROLOGIST.
-                Analyze these WEBSITE SCREENSHOTS from Windy.com and the Telemetry.
+                Analyze these WEBSITE SCREENSHOTS captured from Windy.com.
                 
-                --- CONTEXT ---
+                --- MISSION CONTEXT ---
                 Location: {target_name} ({lat}, {lon})
                 Telemetry: Humidity {w['main']['humidity'] if w else 'N/A'}%
                 
+                --- VISUALS PROVIDED ---
+                The attached images are real-time captures of: {', '.join(layer_names)}.
+                - RADAR: Shows Rain Intensity (Red/Yellow = Heavy).
+                - SATELLITE: Shows Cloud Texture.
+                - WIND: Shows Airflow Particles.
+                
                 --- TASK ---
-                1. Look at the screenshots. Describe the weather patterns (colors, swirls, density).
-                2. Note: Windy.com uses RED/YELLOW for intense rain/wind, WHITE for clouds.
-                3. Correlate visual intensity with the humidity number.
-                4. DECISION: **GO** or **NO-GO** for Cloud Seeding?
+                1. VISUAL ANALYSIS: Describe what you see in the screenshots.
+                   (e.g., "I see a swirling low-pressure system" or "The radar is completely clear").
+                2. CORRELATION: Does the visual intensity match the Humidity?
+                3. DECISION: **GO** or **NO-GO** for Cloud Seeding?
+                4. REASONING: Scientific justification.
                 """
                 
-                inputs = [prompt] + available_images
+                inputs = [prompt] + evidence
                 
-                with st.spinner("Gemini is analyzing website visuals..."):
+                with st.spinner("Gemini is processing visual intelligence..."):
                     try:
                         res = model.generate_content(inputs)
                         st.markdown("### 🤖 Mission Report")
