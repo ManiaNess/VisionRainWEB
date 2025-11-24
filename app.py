@@ -9,10 +9,13 @@ import time
 import folium
 from streamlit_folium import st_folium
 import pandas as pd
+import csv
+import os
 
 # --- CONFIGURATION ---
 DEFAULT_API_KEY = "" 
 WEATHER_API_KEY = "11b260a4212d29eaccbd9754da459059" 
+LOG_FILE = "mission_logs.csv"
 
 st.set_page_config(page_title="VisionRain | Intelligent Planet", layout="wide", page_icon="⛈️")
 
@@ -47,18 +50,10 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# --- 1. MICROLINK AGENT (Captures Specific Windy Layers) ---
+# --- 1. MICROLINK AGENT ---
 def get_windy_capture(lat, lon, layer):
-    """
-    Uses Microlink to screenshot Windy.com layers.
-    Layers: clouds, lclouds (low), mclouds (medium), hclouds (high), radar, rain
-    """
-    # Windy Embed URL
     target_url = f"https://embed.windy.com/embed2.html?lat={lat}&lon={lon}&detailLat={lat}&detailLon={lon}&width=600&height=400&zoom=5&level=surface&overlay={layer}&product=ecmwf&menu=&message=&marker=&calendar=now&pressure=&type=map&location=coordinates&detail=&metricWind=default&metricTemp=default&radarRange=-1"
-    
-    # Microlink API Call (Free Tier)
     api_url = f"https://api.microlink.io?url={urllib.parse.quote(target_url)}&screenshot=true&meta=false&waitFor=4000&viewport.width=600&viewport.height=400"
-    
     try:
         r = requests.get(api_url, timeout=15)
         if r.status_code == 200:
@@ -86,11 +81,25 @@ def get_coordinates(city_name, api_key):
     except: pass
     return None, None
 
+# --- 4. BIGQUERY SIMULATION (ADMIN LOGS) ---
+def log_mission_data(location, humidity, decision, reasoning):
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    file_exists = os.path.isfile(LOG_FILE)
+    with open(LOG_FILE, mode='a', newline='') as file:
+        writer = csv.writer(file)
+        if not file_exists:
+            writer.writerow(["Timestamp", "Location", "Humidity", "Decision", "Reasoning"])
+        writer.writerow([timestamp, location, humidity, decision, reasoning])
+
+def load_mission_logs():
+    if os.path.isfile(LOG_FILE): return pd.read_csv(LOG_FILE)
+    return pd.DataFrame(columns=["Timestamp", "Location", "Humidity", "Decision", "Reasoning"])
+
 # --- SIDEBAR ---
 with st.sidebar:
     st.image("https://cdn-icons-png.flaticon.com/512/414/414927.png", width=90)
     st.title("VisionRain")
-    st.caption("v3.0 | Windy-Only Core")
+    st.caption("Enterprise Core | v5.0")
     
     api_key = st.text_input("Google AI Key", value=DEFAULT_API_KEY, type="password")
     weather_key = st.text_input("OpenWeather Key", value=WEATHER_API_KEY, type="password")
@@ -110,7 +119,7 @@ with st.sidebar:
                 st.session_state['lat'] = lat
                 st.session_state['lon'] = lon
                 st.session_state['target'] = target_input
-                st.session_state['data_fetched'] = False # Force refresh
+                st.session_state['data_fetched'] = False
                 st.rerun()
 
     lat, lon = st.session_state['lat'], st.session_state['lon']
@@ -128,12 +137,25 @@ with st.sidebar:
         st.rerun()
 
     st.info(f"Coords: {lat:.4f}, {lon:.4f}")
+    
+    # --- ADMIN PORTAL (BIGQUERY) ---
+    st.markdown("---")
+    with st.expander("🔒 Admin Portal (BigQuery)"):
+        password = st.text_input("Password", type="password")
+        if password == "123456":
+            st.success("Access Granted")
+            logs = load_mission_logs()
+            st.dataframe(logs)
+            if not logs.empty:
+                st.download_button("Export Logs", logs.to_csv(index=False), "mission_logs.csv")
+        elif password:
+            st.error("Invalid Password")
 
 # --- MAIN UI ---
 st.title("VisionRain Command Center")
 st.markdown(f"### *Mission Target: {target}*")
 
-tab1, tab2, tab3 = st.tabs(["🌍 Strategic Vision (Pitch)", "📡 Live Sensor Array", "🧠 Gemini Fusion Core"])
+tab1, tab2, tab3 = st.tabs(["🌍 Strategic Vision", "📡 Live Sensor Array", "🧠 Gemini Fusion Core"])
 
 # --- TAB 1: THE PITCH ---
 with tab1:
@@ -175,19 +197,16 @@ with tab1:
 
 # --- AUTOMATIC DATA COLLECTION ---
 if 'data_fetched' not in st.session_state or st.session_state.get('last_coords') != (lat, lon):
-    with st.spinner("🛰️ Auto-Deploying Visual Agents... (Capturing Windy Layers)"):
-        # 1. CAPTURE ALL WINDY LAYERS
-        # Standard
+    with st.spinner("🛰️ Auto-Deploying Visual Agents..."):
+        # Capture Windy Layers
         st.session_state['img_radar'] = get_windy_capture(lat, lon, "radar")
         st.session_state['img_rain'] = get_windy_capture(lat, lon, "rain")
         st.session_state['img_wind'] = get_windy_capture(lat, lon, "wind")
-        
-        # Clouds (Specific Types)
         st.session_state['img_clouds'] = get_windy_capture(lat, lon, "clouds")
         st.session_state['img_lclouds'] = get_windy_capture(lat, lon, "lclouds") # Low
         st.session_state['img_hclouds'] = get_windy_capture(lat, lon, "hclouds") # High
         
-        # 2. NUMBERS
+        # Telemetry
         st.session_state['w_data'] = get_weather_telemetry(lat, lon, weather_key)
         
         st.session_state['last_coords'] = (lat, lon)
@@ -207,7 +226,7 @@ with tab2:
     
     st.divider()
 
-    # Visuals Grid (3 Rows)
+    # Visuals Grid
     r1c1, r1c2, r1c3 = st.columns(3)
     with r1c1:
         st.caption("A. Doppler Radar (Windy)")
@@ -249,8 +268,8 @@ with tab3:
             "Actual Data": [
                 f"{w['main']['humidity']}%", 
                 f"{w['wind']['speed']} m/s", 
-                "Analyzing Image E...", 
-                "Analyzing Image F..."
+                "Analyzing Visuals...", 
+                "Analyzing Visuals..."
             ]
         })
         st.table(comp_df)
@@ -311,10 +330,15 @@ with tab3:
             with st.spinner("Gemini 2.0 is fusing visual streams + telemetry..."):
                 try:
                     res = model.generate_content([prompt] + valid_imgs)
+                    
+                    # LOGGING TO BIGQUERY
+                    decision = "GO" if "GO" in res.text.upper() and "NO-GO" not in res.text.upper() else "NO-GO"
+                    log_mission_data(target, f"{w['main']['humidity']}%", decision, "AI Decision")
+                    
                     st.markdown("### 🛰️ Mission Command Report")
                     st.write(res.text)
                     
-                    if "GO" in res.text.upper() and "NO-GO" not in res.text.upper():
+                    if decision == "GO":
                         st.balloons()
                         st.markdown("<div class='success-box'>✅ MISSION APPROVED: Atmospheric Conditions Optimal</div>", unsafe_allow_html=True)
                     else:
