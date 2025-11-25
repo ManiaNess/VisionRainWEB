@@ -8,6 +8,10 @@ import datetime
 import PIL.Image
 from io import BytesIO
 
+# Use os.path.join to be safe
+import os
+file_path = os.path.join(os.getcwd(), "W_XX-EUMETSAT-Darmstadt,OCA+MSG4+SEVIRI_C_EUMG_20190831234500_1_OR_FES_E0000_0100.nc")
+
 # --- 1. APP CONFIGURATION ---
 st.set_page_config(page_title="VisionRain | Cloud Command", layout="wide", page_icon="⛈️")
 
@@ -16,7 +20,7 @@ st.set_page_config(page_title="VisionRain | Cloud Command", layout="wide", page_
 @st.cache_resource
 def load_satellite_data():
     # 👇👇👇 PASTE YOUR EXACT FILENAME INSIDE THE QUOTES BELOW 👇👇👇
-    file_path = "C:\Users\nessp\OneDrive\Documents\GitHub\VisionRainWEB\W_XX-EUMETSAT-Darmstadt,OCA+MSG4+SEVIRI_C_EUMG_20190831234500_1_OR_FES_E0000_0100.nc"
+    #file_path = "C:\Users\nessp\OneDrive\Documents\GitHub\VisionRainWEB\W_XX-EUMETSAT-Darmstadt,OCA+MSG4+SEVIRI_C_EUMG_20190831234500_1_OR_FES_E0000_0100.nc"
     
     try:
         # We use 'h5netcdf' engine for better performance/compatibility on cloud
