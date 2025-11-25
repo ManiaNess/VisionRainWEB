@@ -1,6 +1,7 @@
-streamlit
-google-generativeai
-pillow
-requests
-folium
-streamlit-folium
+streamlit 
+google-generative-ai 
+xarray 
+netcdf4 
+matplotlib 
+pandas 
+plotly
