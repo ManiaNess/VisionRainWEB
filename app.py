@@ -5,8 +5,6 @@ import numpy as np
 import matplotlib.pyplot as plt
 import pandas as pd
 import datetime
-import os
-import csv
 import requests
 from io import BytesIO
 import random
@@ -37,80 +35,63 @@ st.markdown("""
         border-left: 6px solid #00e5ff;
         margin-bottom: 20px;
     }
+    .success-box {
+        background-color: rgba(0, 255, 128, 0.1); 
+        border: 1px solid #00ff80; 
+        color: #00ff80; 
+        padding: 15px; 
+        border-radius: 10px;
+    }
     </style>
     """, unsafe_allow_html=True)
 
-# --- 1. VISUALIZER (SIMULATED) ---
-# Since xarray/netCDF4 are missing, we simulate the scientific output
-# This guarantees the app works for the demo without dependency errors
-def generate_scientific_plots(center_y, center_x, window):
+# --- 1. SIMULATED SCIENTIFIC VISUALIZER (The Fix) ---
+def generate_simulation_plots(center_y, center_x, window):
     """
-    Generates visual plots using procedural noise to simulate satellite data.
-    This removes the need for xarray/netCDF4 libraries.
+    Generates visual plots using math to simulate satellite data.
+    NO XARRAY REQUIRED.
     """
-    
-    # Generate Fake Data (Clouds)
-    # 3712x3712 is the size of a real Meteosat disk
-    size = 3712
-    
-    # Create a 'Planet' mask (Circle) to look like Earth
+    # 1. Create a blank canvas (3712x3712 represents full disk)
+    size = 2000 # Smaller for speed
     y, x = np.ogrid[:size, :size]
     center = size // 2
+    
+    # 2. Draw Earth Disk (Circle Mask)
     mask = (x - center)**2 + (y - center)**2 <= (center - 50)**2
     
-    # Generate Cloud Top Pressure (Random Noise + Structure)
-    # We create 'blobs' to look like clouds
-    raw_press = np.random.randint(200, 1000, (size, size))
-    # Smooth it out to look like weather systems (Fake Blur)
-    # Since we can't use scipy, we just use the noise as a base texture
-    
-    # Generate Cloud Probability (0-100%)
-    raw_prob = np.random.randint(0, 100, (size, size))
-    
-    # Apply Earth Mask
+    # 3. Generate "Clouds" (Random Noise)
+    # Perlin-like noise simulation using random integers + smoothing would be complex, 
+    # so we use simple random blocks for the hackathon demo.
+    raw_press = np.random.rand(size, size) * 1000
+    raw_prob = np.random.rand(size, size) * 100
+
+    # Mask out space (make it 0)
     valid_press = np.where(mask, raw_press, 0)
     valid_prob = np.where(mask, raw_prob, 0)
 
-    # Zoom Slice for Jeddah Sector
-    # Ensuring we don't go out of bounds
-    y_min, y_max = max(0, center_y - window), min(size, center_y + window)
-    x_min, x_max = max(0, center_x - window), min(size, center_x + window)
-    
-    zoom_press = valid_press[y_min:y_max, x_min:x_max]
-    zoom_prob = valid_prob[y_min:y_max, x_min:x_max]
+    # 4. Zoom Sector Stats
+    # Simulate values for Jeddah (just random for demo consistency)
+    avg_press = random.uniform(600, 800)
+    avg_prob = random.uniform(40, 90)
 
-    # Calculate Telemetry Stats
-    avg_press = float(np.mean(zoom_press)) if zoom_press.size > 0 else 0.0
-    avg_prob = float(np.mean(zoom_prob)) if zoom_prob.size > 0 else 0.0
-
-    # Plotting
+    # 5. PLOTTING
     fig = plt.figure(figsize=(10, 12))
     fig.patch.set_facecolor('#0e1117')
     
-    # Plot A: Full Earth Disk (Context)
+    # Top Plot: Global Disk
     ax1 = plt.subplot(2, 1, 1)
-    # Subsample by 20 for speed and "pixelated" satellite look
-    ax1.imshow(valid_press[::20, ::20], cmap='gray_r', vmin=200, vmax=1000)
-    
-    # Draw Target Box
-    rect = plt.Rectangle((center_x/20 - window/20, center_y/20 - window/20), 
-                         window/10, window/10, linewidth=2, edgecolor='cyan', facecolor='none')
-    ax1.add_patch(rect)
-    ax1.set_title("1. Global Context (Meteosat-9 Full Disk)", color="white")
+    ax1.imshow(valid_prob, cmap='Blues_r', vmin=0, vmax=100)
+    ax1.set_title("1. Global Context (Simulated Meteosat)", color="white")
     ax1.axis('off')
-
-    # Plot B: Zoomed Sector (Analysis)
+    
+    # Bottom Plot: Zoomed Sector
     ax2 = plt.subplot(2, 1, 2)
-    im2 = ax2.imshow(zoom_press, cmap='turbo') # Scientific colormap
-    ax2.set_title(f"2. Target Sector Analysis (Microphysics)", color="white")
+    # Create a "Storm" look for the zoom
+    storm_zoom = np.random.rand(100, 100) 
+    im2 = ax2.imshow(storm_zoom, cmap='turbo') 
+    ax2.set_title("2. Target Sector Microphysics (Cloud Top Pressure)", color="white")
     ax2.axis('off')
     
-    # Add Colorbar
-    cbar = plt.colorbar(im2, ax=ax2, orientation='horizontal', fraction=0.05, pad=0.05)
-    cbar.ax.xaxis.set_tick_params(color='white')
-    plt.setp(plt.getp(cbar.ax.axes, 'xticklabels'), color='white')
-    cbar.set_label("Cloud Top Pressure (hPa)", color="white")
-
     plt.tight_layout()
     
     # Save to buffer
@@ -120,7 +101,7 @@ def generate_scientific_plots(center_y, center_x, window):
     
     return Image.open(buf), avg_press, avg_prob
 
-# --- 2. TELEMETRY FETCHER ---
+# --- 2. OWM TELEMETRY ---
 def get_weather_telemetry(lat, lon, key):
     if not key: return None
     try:
@@ -145,22 +126,18 @@ def load_logs():
 with st.sidebar:
     st.image("https://cdn-icons-png.flaticon.com/512/414/414927.png", width=90)
     st.title("VisionRain")
-    st.caption("Scientific Core | EUMETSAT Integration")
+    st.caption("Scientific Core | EUMETSAT")
     
     api_key = st.text_input("Google AI Key", value=DEFAULT_API_KEY, type="password")
     weather_key = st.text_input("OpenWeather Key", value=WEATHER_API_KEY, type="password")
     
-    st.markdown("### 📍 Mission Target")
-    st.info("Locked Sector: **Jeddah (Meteosat)**\nCoords: 24.71, 46.67")
-    lat, lon = 24.7136, 46.6753 # Riyadh/Jeddah region
+    st.markdown("### 📍 Target Sector")
+    st.info("Locked: **Jeddah (Meteosat)**\nCoords: 21.54, 39.17")
+    lat, lon = 21.5433, 39.1728
     
-    # Admin
     with st.expander("🔒 Admin Portal"):
         if st.text_input("Password", type="password") == "123456":
             st.dataframe(load_logs())
-            if st.button("Clear Logs"):
-                if os.path.exists(LOG_FILE): os.remove(LOG_FILE)
-                st.rerun()
 
 # --- MAIN UI ---
 st.title("VisionRain Command Center")
@@ -186,15 +163,18 @@ with tab1:
     with c2:
         st.success("**Impact:** Enables low-cost, safer deployment and scales globally to support emergency climate-response.")
 
-# --- DATA GENERATION ---
-# We simulate the EUMETSAT data reading here to avoid the xarray crash
-# 2300, 750 corresponds to the Jeddah sector in the full disk
-plot_img, pressure, prob = generate_full_and_zoom(2300, 750, 150)
+# --- PROCESS DATA (SIMULATED) ---
+# Use the simulation function defined above
+plot_img, pressure, prob = generate_simulation_plots(1000, 1000, 100)
 
-# Get Live OWM Data (Real Data)
+# Get Live OWM Data
 w = get_weather_telemetry(lat, lon, weather_key)
-humidity = w['main']['humidity'] if w else 65 # Default to reasonable value if key missing
-temp = w['main']['temp'] if w else 35
+if w:
+    humidity = w['main']['humidity']
+    temp = w['main']['temp']
+else:
+    humidity = 65
+    temp = 30
 
 # --- TAB 2: SENSORS ---
 with tab2:
@@ -243,7 +223,6 @@ with tab3:
             try:
                 model = genai.GenerativeModel('gemini-1.5-flash')
                 
-                # --- THE SUPER PROMPT ---
                 prompt = f"""
                 ACT AS A LEAD METEOROLOGIST. Analyze this EUMETSAT Satellite Data.
                 
@@ -274,7 +253,7 @@ with tab3:
                     res = model.generate_content([prompt, plot_img])
                     
                     decision = "GO" if "GO" in res.text.upper() else "NO-GO"
-                    log_mission(f"{lat},{lon}", f"Prob:{prob:.1f}%", decision, "AI Authorized")
+                    log_mission(f"{lat},{lon}", f"Hum:{humidity}%", decision, "AI Authorized")
                     
                     st.markdown("### 🛰️ Mission Command Report")
                     st.write(res.text)
