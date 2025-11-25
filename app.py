@@ -11,6 +11,13 @@ import requests
 from io import BytesIO
 import random
 
+# --- SAFELY IMPORT SCIENTIFIC LIBS ---
+try:
+    import xarray as xr
+except ImportError:
+    st.error("⚠️ Scientific Libraries Missing! Please update requirements.txt with: xarray, netCDF4, h5netcdf")
+    xr = None
+
 # --- CONFIGURATION ---
 DEFAULT_API_KEY = "" 
 WEATHER_API_KEY = "11b260a4212d29eaccbd9754da459059" 
@@ -48,61 +55,94 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# --- 1. SIMULATED VISUALIZER (Raw Graph, Clean Numbers) ---
-def generate_scientific_plots(center_y, center_x, window):
+# --- 1. DATA LOADER ---
+@st.cache_resource
+def load_netcdf_data():
+    if xr is None: return None
+    if os.path.exists(NETCDF_FILE):
+        try:
+            return xr.open_dataset(NETCDF_FILE, engine='netcdf4')
+        except Exception as e:
+            st.error(f"Error reading NetCDF: {e}")
+            return None
+    return None
+
+# --- 2. SCIENTIFIC VISUALIZER (FIXED MATH) ---
+def generate_scientific_plots(ds, center_y, center_x, window, title_prefix="Target"):
     """
-    Generates visual plots using RAW simulation (messy graph), but returns CLEAN numbers.
+    Generates the Matplotlib visualization using masked arrays to fix probability values.
     """
-    size = 3712
-    
-    # Create Raw Data (Simulated)
-    # We allow high values here to mimic the "raw satellite feed" look
-    raw_press = np.random.randint(200, 1000, (size, size))
-    raw_prob = np.random.randint(0, 200, (size, size)) # Allow >100 for visual noise
+    if ds is None: return None, 0, 0
 
-    # Zoom Slice
-    y_min, y_max = max(0, center_y - window), min(size, center_y + window)
-    x_min, x_max = max(0, center_x - window), min(size, center_x + window)
-    
-    zoom_press = raw_press[y_min:y_max, x_min:x_max]
-    zoom_prob = raw_prob[y_min:y_max, x_min:x_max]
+    # 1. Dynamic Dimension Finder
+    dims = list(ds['cloud_probability'].dims)
+    y_dim_name = dims[0]
+    x_dim_name = dims[1]
 
-    # --- CALCULATE CLEAN METRICS ---
-    # We clamp the values here ONLY for the text display
-    clean_prob = float(np.mean(zoom_prob))
-    if clean_prob > 100: clean_prob = 95.5 # Cap it for the UI so it doesn't look broken
+    # 2. Slicing
+    max_y = ds.sizes[y_dim_name]
+    max_x = ds.sizes[x_dim_name]
     
-    avg_press = float(np.mean(zoom_press))
+    y_start = max(0, center_y - window)
+    y_end = min(max_y, center_y + window)
+    x_start = max(0, center_x - window)
+    x_end = min(max_x, center_x + window)
 
-    # --- PLOTTING (RAW VISUALS) ---
-    fig = plt.figure(figsize=(10, 12))
+    slice_dict = {
+        y_dim_name: slice(y_start, y_end),
+        x_dim_name: slice(x_start, x_end)
+    }
+
+    # 3. Extract Data & MASK INVALID VALUES
+    # Cloud Top Pressure (hPa)
+    raw_press = ds['cloud_top_pressure'].isel(**slice_dict).values
+    # Mask values > 1100 (Space/Error) and < 0
+    press_masked = np.where((raw_press > 0) & (raw_press < 1100), raw_press, np.nan)
+    
+    # Cloud Probability (0-100)
+    raw_prob = ds['cloud_probability'].isel(**slice_dict).values
+    # Mask values > 100 (Space/Error) and < 0
+    prob_masked = np.where((raw_prob >= 0) & (raw_prob <= 100), raw_prob, np.nan)
+    
+    # 4. Calculate Valid Averages (Ignoring NaNs)
+    avg_press = float(np.nanmean(press_masked)) if not np.isnan(np.nanmean(press_masked)) else 0.0
+    avg_prob = float(np.nanmean(prob_masked)) if not np.isnan(np.nanmean(prob_masked)) else 0.0
+
+    # 5. PLOT
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 7))
     fig.patch.set_facecolor('#0e1117')
-    
-    # Plot A: Full Earth Disk
-    ax1 = plt.subplot(2, 1, 1)
-    ax1.imshow(raw_prob[::20, ::20], cmap='Blues_r') # Raw visual
-    rect = plt.Rectangle((center_x/20 - window/20, center_y/20 - window/20), 
-                         window/10, window/10, linewidth=2, edgecolor='cyan', facecolor='none')
-    ax1.add_patch(rect)
-    ax1.set_title("1. Global Context (Meteosat Full Disk)", color="white")
-    ax1.axis('off')
 
-    # Plot B: Zoomed Sector
-    ax2 = plt.subplot(2, 1, 2)
-    im2 = ax2.imshow(zoom_press, cmap='turbo') 
-    ax2.set_title("2. Target Sector Analysis (Cloud Top Pressure)", color="white")
+    # Plot 1: Satellite Feed (Pressure)
+    im1 = ax1.imshow(sat_image, cmap='gray_r', origin='upper')
+    ax1.set_title(f"{title_prefix} Satellite Feed (Cloud Top Pressure)", fontsize=12, color="white")
+    ax1.axis('off')
+    plt.colorbar(im1, ax=ax1, label="Pressure (Pa)").ax.yaxis.set_tick_params(color='white')
+
+
+
+    # Plot 2: AI Detection (Probability)
+    im2 = ax2.imshow(prob_masked, cmap='Blues', vmin=0, vmax=100, origin='upper')
+    ax2.set_title(f"{title_prefix} AI Identification (Cloud Probability)", fontsize=12, color="white")
     ax2.axis('off')
-    
+    plt.colorbar(im2, ax=ax2, label="Probability %").ax.yaxis.set_tick_params(color='white')
+
+    # Add Crosshair
+    mid_y = (y_end - y_start) // 2
+    mid_x = (x_end - x_start) // 2
+    ax1.plot(mid_x, mid_y, 'c+', markersize=20, markeredgewidth=3)
+    ax2.plot(mid_x, mid_y, 'r+', markersize=20, markeredgewidth=3)
+
+    plt.suptitle(f"System Lock: {center_x}X / {center_y}Y", fontsize=16, fontweight='bold', color="#00e5ff")
     plt.tight_layout()
     
-    # Save to buffer
+    # Save to Buffer
     buf = BytesIO()
     plt.savefig(buf, format="png", facecolor='#0e1117')
     buf.seek(0)
     
-    return Image.open(buf), avg_press, clean_prob
+    return Image.open(buf), avg_press, avg_prob
 
-# --- 2. OWM TELEMETRY ---
+# --- 3. OWM TELEMETRY ---
 def get_weather_telemetry(lat, lon, key):
     if not key: return None
     try:
@@ -110,7 +150,7 @@ def get_weather_telemetry(lat, lon, key):
         return requests.get(url).json()
     except: return None
 
-# --- 3. LOGGING ---
+# --- 4. LOGGING ---
 def log_mission(location, conditions, decision, reason):
     ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     file_exists = os.path.isfile(LOG_FILE)
@@ -127,13 +167,13 @@ def load_logs():
 with st.sidebar:
     st.image("https://cdn-icons-png.flaticon.com/512/414/414927.png", width=90)
     st.title("VisionRain")
-    st.caption("Scientific Core | EUMETSAT Integration")
+    st.caption("Scientific Core | EUMETSAT")
     
     api_key = st.text_input("Google AI Key", value=DEFAULT_API_KEY, type="password")
     
     st.markdown("### 📍 Mission Target")
-    st.info("Locked Sector: **Jeddah (Meteosat)**\nCoords: 24.71, 46.67")
-    lat, lon = 24.7136, 46.6753 # Riyadh/Jeddah region
+    st.info("Locked Sector: **Jeddah Storm**")
+    lat, lon = 21.54, 39.17
     
     # Admin
     with st.expander("🔒 Admin Portal"):
@@ -167,9 +207,20 @@ with tab1:
     with c2:
         st.success("**Impact:** Enables low-cost, safer deployment and scales globally to support emergency climate-response.")
 
-# --- PROCESS DATA ---
-# Generate Visuals (Raw) + Numbers (Clean)
-plot_img, pressure, prob = generate_scientific_plots(2300, 750, 150)
+# --- DATA PROCESSING ---
+ds = load_netcdf_data()
+
+if ds:
+    # 1. Generate Full Disk (Global Context)
+    # Using center of disk (approx 1856, 1856) and large window
+    full_img, _, _ = generate_scientific_plots(ds, 1856, 1856, 1800, title_prefix="Global")
+    
+    # 2. Generate Zoomed Sector (Jeddah)
+    # Using your coordinates (2300, 750)
+    zoom_img, pressure, prob = generate_scientific_plots(ds, 2300, 750, 100, title_prefix="Jeddah Sector")
+else:
+    st.error("⚠️ NetCDF File Missing. Please upload 'W_XX...nc' to GitHub.")
+    full_img, zoom_img, pressure, prob = None, None, 0, 0
 
 # Get Live OWM Data
 w = get_weather_telemetry(lat, lon, WEATHER_API_KEY)
@@ -179,15 +230,21 @@ humidity = w['main']['humidity'] if w else 65
 with tab2:
     st.header("Real-Time Hydro-Meteorological Fusion")
     
-    if plot_img:
-        st.image(plot_img, caption="Meteosat-9 Analysis: Full Disk (Top) & Target Sector (Bottom)", use_column_width=True)
+    # VISUALS
+    if full_img:
+        st.image(full_img, caption="1. Global Context (Meteosat Full Disk)", use_column_width=True)
+    
+    st.write("---")
+    
+    if zoom_img:
+        st.image(zoom_img, caption="2. Target Sector Analysis (Jeddah)", use_column_width=True)
 
     st.divider()
     
     # TELEMETRY TABLE
     st.subheader("Microphysical Telemetry")
     c1, c2, c3, c4 = st.columns(4)
-    # Display the CLEANED Probability
+    # Corrected Probability Format (0.0 - 100.0)
     c1.metric("Cloud Probability", f"{prob:.1f}%", "AI Confidence")
     c2.metric("Cloud Top Pressure", f"{pressure:.0f} hPa", "Altitude Proxy")
     c3.metric("Surface Humidity", f"{humidity}%", "Station Data")
@@ -207,16 +264,16 @@ with tab3:
     st.table(pd.DataFrame(table_data))
 
     # 2. VISUAL EVIDENCE
-    if plot_img:
-        st.caption("Visual Evidence (Sent to Vertex AI):")
-        st.image(plot_img, width=400)
+    if zoom_img:
+        st.caption("Visual Evidence Sent to Vertex AI:")
+        st.image(zoom_img, width=500)
 
     st.divider()
 
     if st.button("RUN STRATEGIC ANALYSIS", type="primary"):
         if not api_key:
             st.error("🔑 Google API Key Missing!")
-        elif not plot_img:
+        elif not zoom_img:
             st.error("⚠️ No Data.")
         else:
             genai.configure(api_key=api_key)
@@ -237,8 +294,9 @@ with tab3:
                 - Surface Humidity: {humidity}%
                 
                 --- VISUALS (Attached) ---
-                - Top Image: Full Earth Disk (Global Context).
-                - Bottom Image: Target Sector (Cloud Top Pressure). Darker/Grey = Lower Clouds, White = Higher Clouds.
+                The image contains two plots:
+                - Left: Cloud Top Pressure (Darker/Grey = Lower/Warmer Clouds).
+                - Right: AI Probability Mask (Blue = High Probability).
                 
                 --- LOGIC ---
                 1. IF Probability > 60% AND Pressure < 800hPa -> "GO" (Cloud is substantial).
@@ -251,7 +309,7 @@ with tab3:
                 """
                 
                 with st.spinner("Vertex AI is calculating microphysics..."):
-                    res = model.generate_content([prompt, plot_img])
+                    res = model.generate_content([prompt, zoom_img])
                     
                     decision = "GO" if "GO" in res.text.upper() else "NO-GO"
                     log_mission(f"{lat},{lon}", f"Prob:{prob:.1f}%", decision, "AI Authorized")
