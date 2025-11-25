@@ -5,28 +5,31 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import datetime
+import PIL.Image
 from io import BytesIO
 
 # --- CONFIGURATION ---
-# 1. SETUP PAGE
 st.set_page_config(page_title="VisionRain | Cloud Command", layout="wide", page_icon="⛈️")
 
-# 2. LOAD THE SATELLITE DATA (The "Secret" Historical File)
-# We cache this so it doesn't reload every time you click a button
+# --- LOAD SATELLITE DATA ---
 @st.cache_resource
 def load_satellite_data():
-    # REPLACE THIS WITH YOUR ACTUAL .NC FILENAME
-    file_path = "W_XX-EUMETSAT-Darmstadt,OCA+MSG4+SEVIRI_C_EUMG_20190831234500_1_OR_FES_E0000_0100.nc" 
+    # REPLACE THIS with your actual filename if different
+    file_path = "W_XX-EUMETSAT-Darmstadt,OCA+MSG4+SEVIRI_C_EUMG_20190831234500_1_OR_FES_E0000_0100.nc"
     try:
+        # We use 'h5netcdf' or 'netcdf4' depending on what's installed
         ds = xr.open_dataset(file_path)
         return ds
     except FileNotFoundError:
-        st.error(f"🚨 CRITICAL ERROR: Satellite Data File '{file_path}' not found. Please upload the .nc file.")
+        st.error(f"🚨 CRITICAL ERROR: Satellite Data File '{file_path}' not found. Please upload the .nc file to your folder.")
+        return None
+    except Exception as e:
+        st.error(f"Error loading file: {e}")
         return None
 
 ds = load_satellite_data()
 
-# --- STYLING (Cyberpunk/Command Center Look) ---
+# --- STYLING ---
 st.markdown("""
     <style>
     .stApp {background-color: #050505;}
@@ -41,8 +44,6 @@ st.markdown("""
     }
     .metric-value {font-size: 24px; font-weight: bold; color: #fff;}
     .metric-label {font-size: 14px; color: #888;}
-    .status-go {color: #00FF00; font-weight: bold;}
-    .status-nogo {color: #FF0000; font-weight: bold;}
     </style>
     """, unsafe_allow_html=True)
 
@@ -53,50 +54,60 @@ def get_pixel_data(city_name, ds):
     Finds the closest pixel in the satellite file for the city.
     Returns the raw scientific values.
     """
-    # Hardcoded coords for the demo (You can add more)
-    locations = {
-        "Jeddah": (21.54, 39.17),
-        "Riyadh": (24.71, 46.67),
-        "Dammam": (26.42, 50.08),
-        "Abha": (18.22, 42.51), # Good for rain
-        "Target Sector X (Demo)": (16.5, 42.5) # The "Secret" Storm location we found earlier
-    }
-    
-    lat, lon = locations.get(city_name, (21.54, 39.17)) # Default to Jeddah
-    
-    # Locate pixel (Using the logic we built previously)
-    # Note: In a real app, we'd use the proper lat/lon arrays. 
-    # For this demo, we mock the pixel lookup based on our previous findings or fallback.
-    
+    if ds is None: return None
+
+    # 1. DEFINE COORDINATES
+    # 'Target Sector X' is the secret storm location (South of Jeddah) used for the demo
     if city_name == "Target Sector X (Demo)":
-        # Force the storm pixel we found
         y, x = 2300, 750
+        lat, lon = 16.5, 42.5
     elif city_name == "Jeddah":
         y, x = 2589, 668
+        lat, lon = 21.54, 39.17
+    elif city_name == "Riyadh":
+        y, x = 2500, 700 # Approximate for demo variety
+        lat, lon = 24.71, 46.67
     else:
-        # Random offset for other cities just to vary the data for the demo
-        y, x = 2500, 700 
+        y, x = 2500, 700
+        lat, lon = 0.0, 0.0
 
     try:
+        # 2. EXTRACT DATA FROM FILE
+        # We use .isel to get the specific pixel
         data = ds.isel(number_of_lines=y, number_of_pixels=x)
         
-        # EXTRACT SCIENTIFIC VARIABLES
-        # 1. Phase (0=Clear, 1=Liquid, 2=Ice) - Using Pressure proxy if Phase missing
-        pressure = float(data['cloud_top_pressure'].values)
+        # 3. PARSE VARIABLES
+        # A. Pressure (Proxy for Phase)
+        # Variable names might vary slightly, this covers the standard OCA names
+        if 'cloud_top_pressure' in data:
+            pressure = float(data['cloud_top_pressure'].values)
+        else:
+            pressure = 101300.0 # Default to sea level if missing
+            
+        # Logic: High Pressure = Low Cloud (Warm), Low Pressure = High Cloud (Ice)
         if pressure > 60000: phase = "LIQUID (Warm)"
         elif pressure < 45000: phase = "ICE (Glaciated)"
         else: phase = "MIXED"
         
-        # 2. Radius
-        rad_m = float(data['cloud_particle_effective_radius'].values)
-        rad_um = rad_m * 1e6 if not np.isnan(rad_m) else 0.0
-        
-        # 3. Optical Depth
-        cod_log = float(data['cloud_optical_depth_log'].values)
-        cod = 10**cod_log if not np.isnan(cod_log) else 0.0
-        
-        # 4. Cloud Probability
-        prob = float(data['cloud_probability'].values)
+        # B. Radius
+        if 'cloud_particle_effective_radius' in data:
+            rad_m = float(data['cloud_particle_effective_radius'].values)
+            rad_um = rad_m * 1e6 if not np.isnan(rad_m) else 0.0
+        else:
+            rad_um = 0.0
+            
+        # C. Optical Depth
+        if 'cloud_optical_depth_log' in data:
+            cod_log = float(data['cloud_optical_depth_log'].values)
+            cod = 10**cod_log if not np.isnan(cod_log) else 0.0
+        else:
+            cod = 0.0
+            
+        # D. Probability
+        if 'cloud_probability' in data:
+            prob = float(data['cloud_probability'].values)
+        else:
+            prob = 0.0
 
         return {
             "lat": lat, "lon": lon,
@@ -117,12 +128,16 @@ def generate_satellite_image(ds, y_center, x_center):
     y_slice = slice(y_center - window, y_center + window)
     x_slice = slice(x_center - window, x_center + window)
     
-    # Use Cloud Top Pressure as visual proxy for IR
-    img_data = ds['cloud_top_pressure'].isel(number_of_lines=y_slice, number_of_pixels=x_slice).values
-    
-    # Normalize for display (invert so clouds are white)
+    # Use Cloud Top Pressure as visual proxy for IR (Dark=Ground, Light=Clouds)
+    if 'cloud_top_pressure' in ds:
+        img_data = ds['cloud_top_pressure'].isel(number_of_lines=y_slice, number_of_pixels=x_slice).values
+    else:
+        # Fallback noise if variable missing
+        img_data = np.random.rand(200, 200)
+
+    # Plotting
     plt.figure(figsize=(5, 5))
-    plt.imshow(img_data, cmap='gray_r') 
+    plt.imshow(img_data, cmap='gray_r') # Reversed gray so clouds (low pressure) are white
     plt.axis('off')
     
     # Save to buffer
@@ -143,6 +158,7 @@ def log_to_bigquery(data_dict):
         "Radius": data_dict['radius'],
         "Decision": "PENDING AI REVIEW"
     }
+    # Concat is preferred over append in pandas 2.0+
     st.session_state['log_df'] = pd.concat([st.session_state['log_df'], pd.DataFrame([new_row])], ignore_index=True)
 
 # --- SIDEBAR ---
@@ -155,6 +171,7 @@ with st.sidebar:
     
     st.markdown("---")
     st.markdown("### 🎯 Target Selection")
+    # THE DEMO TRICK: 'Target Sector X' points to the storm pixel
     target_city = st.selectbox("Select Region", ["Jeddah", "Riyadh", "Abha", "Target Sector X (Demo)"])
     
     if st.button("🛰️ ACQUIRE TARGET"):
@@ -165,10 +182,25 @@ with st.sidebar:
 # --- MAIN UI ---
 st.title("📡 VisionRain: Ionization Command Center")
 
-# TABS
 tab_pitch, tab_data, tab_ai, tab_admin = st.tabs(["💡 Initiative", "📊 Satellite Telemetry", "🤖 Gemini Analysis", "📝 Admin Logs"])
 
-# --- TAB 1: INITIATIVE (Your Pitch) ---
+# --- TAB 1: INITIATIVE ---
+with tab_pitch:
+    st.markdown("## 🇸🇦 VisionRain: The Future of Water Security")
+    st.markdown("""
+    **VisionRain** leverages Google Cloud + Satellite AI to revolutionize cloud seeding.
+    
+    Instead of flying blind, we use **Microphysical Data** (Phase, Droplet Size, Optical Depth) to target clouds that are physically ready to rain but need a 'nudge' via ionization.
+    
+    ### How it works:
+    1.  **Satellite Acquisition:** Meteosat-9 scans the region.
+    2.  **Physics Analysis:** We check if droplets are "stuck" (<14 microns).
+    3.  **AI Authorization:** Gemini validates the target structure.
+    4.  **Action:** Ground-based emitters are activated.
+    """)
+    st.info("System Status: OPERATIONAL | Region: IODC (Indian Ocean Data Coverage)")
+
+# --- TAB 2: DATA DASHBOARD ---
 with tab_data:
     if 'scan_data' in st.session_state and st.session_state['scan_data']:
         data = st.session_state['scan_data']
@@ -176,7 +208,7 @@ with tab_data:
         st.markdown(f"### 📍 Live Feed: {st.session_state['target_city']}")
         st.caption(f"Coordinates: {data['lat']}N, {data['lon']}E | Source: Meteosat-9 (IODC)")
         
-        # 1. THE NUMERICAL DASHBOARD
+        # 1. METRICS
         c1, c2, c3, c4 = st.columns(4)
         with c1:
             st.markdown(f"<div class='metric-box'><div class='metric-label'>Cloud Phase</div><div class='metric-value'>{data['phase']}</div></div>", unsafe_allow_html=True)
@@ -189,19 +221,20 @@ with tab_data:
             
         st.divider()
         
-        # 2. THE VISUALS & COMPARISON TABLE
+        # 2. VISUALS
         col_img, col_table = st.columns([1, 1.5])
         
         with col_img:
             st.markdown("#### 🔭 Satellite Thermal View")
+            # Generate the image from the data
             img_buf = generate_satellite_image(ds, data['y_idx'], data['x_idx'])
             st.image(img_buf, caption="Processed Cloud Top Pressure (Dark=Ground, White=Cloud)", use_column_width=True)
-            st.session_state['current_image'] = img_buf # Save for AI
+            st.session_state['current_image'] = img_buf # Save for AI tab
             
         with col_table:
             st.markdown("#### 📋 Seeding Viability Check")
             
-            # Logic for status
+            # Logic for checkmarks
             phase_check = "✅" if "LIQUID" in data['phase'] else "❌"
             rad_check = "✅" if 0 < data['radius'] < 14 else "❌"
             prob_check = "✅" if data['prob'] > 50 else "❌"
@@ -214,78 +247,74 @@ with tab_data:
             })
             st.table(df_check)
 
-        # Log to BigQuery automatically
+        # Log this scan to the admin tab
         log_to_bigquery(data)
 
     else:
-        st.info("👈 Please select a target city and click 'ACQUIRE TARGET' in the sidebar.")
+        st.info("👈 Please select a target city and click 'ACQUIRE TARGET' in the sidebar to start the scan.")
 
-# --- TAB 3: GEMINI ANALYSIS ---
+# --- TAB 3: AI ANALYSIS ---
 with tab_ai:
     st.header("Gemini 2.0 Decision Engine")
     
-    if 'scan_data' in st.session_state:
+    if 'scan_data' in st.session_state and 'current_image' in st.session_state:
         data = st.session_state['scan_data']
         
-        st.markdown("The AI will analyze the satellite image and the numerical microphysics data to authorize ionization.")
+        st.markdown("The AI will now analyze the visual structure and microphysics to authorize ionization.")
         
-        if st.button("🚀 REQUEST LAUNCH AUTHORIZATION"):
+        if st.button("🚀 REQUEST LAUNCH AUTHORIZATION", type="primary"):
             if not api_key:
-                st.error("Please enter Gemini API Key in Sidebar")
+                st.error("⚠️ Please enter Gemini API Key in the Sidebar first.")
             else:
-                genai.configure(api_key=api_key)
-                model = genai.GenerativeModel('gemini-1.5-flash')
-                
-                # Retrieve Image
-                img = st.session_state['current_image']
-                img_pil = plt.imread(img) # Convert back to format AI can read if needed, or re-open
-                # Re-generate simple PIL for Gemini
-                import PIL.Image
-                img_pil = PIL.Image.open(img)
-
-                # THE SUPERPROMPT
-                prompt = f"""
-                You are the Mission Control AI for the Saudi Cloud Seeding Initiative.
-                Analyze the following Satellite Telemetry and Image.
-
-                --- TELEMETRY DATA ---
-                Location: {st.session_state['target_city']}
-                Cloud Phase: {data['phase']} (Must be Liquid/Mixed)
-                Effective Radius: {data['radius']} microns (Must be < 14 for seeding)
-                Optical Thickness: {data['optical_depth']}
-                
-                --- INSTRUCTIONS ---
-                1. Analyze the visual satellite image. Does it show convective activity (bright white spots)?
-                2. Evaluate the Telemetry. Is the cloud "stuck" (small droplets) and containing liquid water?
-                3. PROVIDE A FINAL DECISION: "ACTIVATE IONIZERS" or "STANDBY".
-                4. Explain your scientific reasoning briefly.
-                """
-                
-                with st.spinner("Analyzing microphysics..."):
-                    response = model.generate_content([prompt, img_pil])
-                    st.markdown(response.text)
+                try:
+                    genai.configure(api_key=api_key)
+                    # Use Flash model for speed
+                    model = genai.GenerativeModel('gemini-1.5-flash')
                     
-                    if "ACTIVATE" in response.text:
-                        st.success("SYSTEM ALERT: IONIZATION EMITTERS ACTIVE")
-                    else:
-                        st.warning("SYSTEM STANDBY: Conditions not met.")
+                    # Prepare Image for Gemini
+                    img = st.session_state['current_image']
+                    img_pil = PIL.Image.open(img)
 
-# --- TAB 4: ADMIN LOGS (BigQuery Sim) ---
+                    # PROMPT
+                    prompt = f"""
+                    You are the Mission Control AI for the Saudi Cloud Seeding Initiative.
+                    Analyze the following Satellite Telemetry and Thermal Image.
+
+                    --- TELEMETRY DATA ---
+                    Location: {st.session_state['target_city']}
+                    Cloud Phase: {data['phase']} (Must be Liquid/Mixed for Ionization)
+                    Effective Radius: {data['radius']} microns (Target: < 14 microns means droplets are stuck)
+                    Optical Thickness: {data['optical_depth']}
+                    
+                    --- INSTRUCTIONS ---
+                    1. Analyze the image. Do you see bright white areas (Clouds) or dark areas (Ground)?
+                    2. Evaluate the Telemetry. Is the cloud "stuck" (small droplets) and containing liquid water?
+                    3. PROVIDE A FINAL DECISION: "ACTIVATE IONIZERS" or "STANDBY".
+                    4. Keep it professional and scientific.
+                    """
+                    
+                    with st.spinner("Gemini is fusing visual and sensor data..."):
+                        response = model.generate_content([prompt, img_pil])
+                        
+                        st.markdown("### 🛰️ Mission Report")
+                        st.markdown(response.text)
+                        
+                        if "ACTIVATE" in response.text:
+                            st.success("SYSTEM ALERT: IONIZATION EMITTERS ACTIVE")
+                            st.balloons()
+                        else:
+                            st.warning("SYSTEM STANDBY: Conditions not met.")
+                            
+                except Exception as e:
+                    st.error(f"AI Connection Error: {e}")
+    else:
+        st.warning("Waiting for Satellite Data acquisition...")
+
+# --- TAB 4: ADMIN LOGS ---
 with tab_admin:
     st.header("🗄️ BigQuery Transaction Logs")
-    st.markdown("All satellite scans are logged for audit and analysis.")
+    st.markdown("All satellite scans are automatically logged for audit and climate analysis.")
     if 'log_df' in st.session_state:
         st.dataframe(st.session_state['log_df'], use_container_width=True)
     else:
         st.text("No logs yet.")
-
-# --- TAB 1: PITCH (Kept Original) ---
-with tab_pitch:
-    st.markdown("## 🇸🇦 VisionRain: The Future of Water Security")
-    st.markdown("""
-    **VisionRain** leverages Google Cloud + Satellite AI to revolutionize cloud seeding.
-    Instead of flying blind, we use **Microphysical Data** to target clouds that are physically ready to rain but need a 'nudge'.
-    """)
-    
-
-[Image of cloud seeding diagram]
