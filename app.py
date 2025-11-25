@@ -96,7 +96,7 @@ def generate_scientific_plots(ds, center_y, center_x, window, title_prefix="Targ
 
     # 3. Extract Data
     sat_image = ds['cloud_top_pressure'].isel(**slice_dict)
-    ai_mask = ds['cloud_probability'].isel(**slice_dict)
+    ai_mask = (ds['cloud_probability'].isel(**slice_dict))/100
     
     # Calculate Stats for Telemetry
     avg_press = float(sat_image.mean()) / 100.0 if sat_image.size > 0 else 0
