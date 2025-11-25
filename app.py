@@ -78,7 +78,7 @@ def generate_scientific_plots(ds, center_y, center_x, window, title_prefix="Targ
     """
     Generates the Matplotlib visualization using the user's exact logic.
     """
-    if ds is None: return None, 0, 0, 0 
+    if ds is None: return None, 0, 0, 0, 0 # <--- UPDATED: Returns 5 values now
 
     # 1. Dynamic Dimension Finder
     try:
@@ -86,7 +86,7 @@ def generate_scientific_plots(ds, center_y, center_x, window, title_prefix="Targ
         y_dim_name = dims[0]
         x_dim_name = dims[1]
     except:
-        return None, 0, 0, 0
+        return None, 0, 0, 0, 0
 
     # 2. Slicing
     # Ensure we don't go out of bounds
@@ -107,13 +107,21 @@ def generate_scientific_plots(ds, center_y, center_x, window, title_prefix="Targ
     sat_image = ds['cloud_top_pressure'].isel(**slice_dict)
     ai_mask = (ds['cloud_probability'].isel(**slice_dict))/100
     
-    # --- Radius Extraction ---
+    # --- 3a. Radius Extraction ---
     if 'cloud_particle_effective_radius' in ds:
         rad_slice = ds['cloud_particle_effective_radius'].isel(**slice_dict)
         avg_rad = float(rad_slice.mean()) * 1e6 
     else:
         avg_rad = 0.0
-    # -------------------------
+        
+    # --- 3b. Optical Depth Extraction (New) ---
+    if 'cloud_optical_depth_log' in ds:
+        cod_slice = ds['cloud_optical_depth_log'].isel(**slice_dict)
+        # File stores as Log10. Convert to Linear: 10^x
+        # We calculate mean of linear values for accuracy
+        avg_cod = float((10**cod_slice).mean())
+    else:
+        avg_cod = 0.0
 
     # Calculate Stats for Telemetry
     avg_press = float(sat_image.mean()) / 100.0 if sat_image.size > 0 else 0
@@ -150,7 +158,7 @@ def generate_scientific_plots(ds, center_y, center_x, window, title_prefix="Targ
     buf.seek(0)
     plt.close(fig)
     
-    return Image.open(buf), avg_press, avg_prob, avg_rad
+    return Image.open(buf), avg_press, avg_prob, avg_rad, avg_cod # <--- UPDATED: Return 5 values
 
 # --- 3. OWM TELEMETRY ---
 def get_weather_telemetry(lat, lon, key):
@@ -222,13 +230,15 @@ ds = load_netcdf_data()
 
 if ds:
     # 1. Generate Full Disk (Global Context)
-    full_img, _, _, _ = generate_scientific_plots(ds, 1856, 1856, 1800, title_prefix="Global")
+    # We ignore extra metrics for the global view
+    full_img, _, _, _, _ = generate_scientific_plots(ds, 1856, 1856, 1800, title_prefix="Global")
     
     # 2. Generate Zoomed Sector (Jeddah)
-    zoom_img, pressure, prob, radius = generate_scientific_plots(ds, 2300, 750, 100, title_prefix="Jeddah Sector")
+    # Unpack all 5 variables
+    zoom_img, pressure, prob, radius, opt_depth = generate_scientific_plots(ds, 2300, 750, 100, title_prefix="Jeddah Sector")
 else:
     st.error("⚠️ NetCDF File Missing. Please upload 'W_XX...nc' to GitHub.")
-    full_img, zoom_img, pressure, prob, radius = None, None, 0, 0, 0
+    full_img, zoom_img, pressure, prob, radius, opt_depth = None, None, 0, 0, 0, 0
 
 # Get Live OWM Data
 w = get_weather_telemetry(lat, lon, WEATHER_API_KEY)
@@ -249,13 +259,14 @@ with tab2:
 
     st.divider()
     
-    # TELEMETRY TABLE
+    # TELEMETRY TABLE (Updated with 5th Metric)
     st.subheader("Microphysical Telemetry")
-    c1, c2, c3, c4 = st.columns(4)
+    c1, c2, c3, c4, c5 = st.columns(5) # Changed to 5 columns
     c1.metric("Cloud Probability", f"{prob:.1f}%", "AI Confidence")
     c2.metric("Cloud Top Pressure", f"{pressure:.0f} hPa", "Altitude Proxy")
     c3.metric("Droplet Radius", f"{radius:.1f} µm", "Stalled Growth")
-    c4.metric("Humidity", f"{humidity}%", "Atmospheric Water") # <--- ADDED HUMIDITY HERE
+    c4.metric("Optical Depth", f"{opt_depth:.1f}", "Water Volume") # <--- NEW
+    c5.metric("Humidity", f"{humidity}%", "Atmospheric Water")
 
 # --- TAB 3: GEMINI FUSION ---
 with tab3:
@@ -264,9 +275,9 @@ with tab3:
     # 1. MASTER TABLE
     st.markdown("### 🔬 Physics-Informed Logic (The Master Table)")
     table_data = {
-        "Parameter": ["Cloud Probability", "Cloud Top Pressure", "Droplet Radius", "Humidity"],
-        "Ideal Range": ["> 70%", "< 700 hPa", "< 14 µm (Stuck)", "> 50%"],
-        "Current Value": [f"{prob:.1f}%", f"{pressure:.0f} hPa", f"{radius:.1f} µm", f"{humidity}%"]
+        "Parameter": ["Cloud Probability", "Cloud Top Pressure", "Droplet Radius", "Optical Depth", "Humidity"],
+        "Ideal Range": ["> 70%", "< 700 hPa", "< 14 µm", "> 10", "> 50%"],
+        "Current Value": [f"{prob:.1f}%", f"{pressure:.0f} hPa", f"{radius:.1f} µm", f"{opt_depth:.1f}", f"{humidity}%"]
     }
     st.table(pd.DataFrame(table_data))
 
@@ -285,7 +296,7 @@ with tab3:
         else:
             genai.configure(api_key=api_key)
             try:
-                model = genai.GenerativeModel('gemini-2.5-flash')
+                model = genai.GenerativeModel('gemini-1.5-flash')
                 
                 # --- THE SUPER PROMPT ---
                 prompt = f"""
@@ -296,10 +307,11 @@ with tab3:
                 Objective: Hygroscopic Cloud Seeding.
                 
                 --- INPUT DATA ---
-                - AI Cloud Probability: {prob:.1f}% (0-100 scale)
-                - Cloud Top Pressure: {pressure:.0f} hPa
-                - Droplet Effective Radius: {radius:.1f} microns
-                - Surface Humidity: {humidity}%
+                1. AI Cloud Probability: {prob:.1f}% (0-100 scale)
+                2. Cloud Top Pressure: {pressure:.0f} hPa
+                3. Droplet Effective Radius: {radius:.1f} microns
+                4. Optical Depth (Thickness): {opt_depth:.1f}
+                5. Surface Humidity: {humidity}%
                 
                 --- VISUALS (Attached) ---
                 The image contains two plots:
@@ -310,20 +322,23 @@ with tab3:
                 1. IF Probability > 60% AND Pressure < 800hPa -> "GO" (Cloud is substantial).
                 2. IF Droplet Radius < 14 microns -> "GO" (Cloud is stuck, needs seeding).
                 3. IF Droplet Radius > 14 microns -> "NO-GO" (Already raining).
-                4. IF Humidity < 30% -> "NO-GO" (Too dry).
+                4. IF Optical Depth < 5 -> "NO-GO" (Cloud too thin).
+                5. IF Humidity < 30% -> "NO-GO" (Too dry).
                 
                 --- OUTPUT ---
-                1. **Analysis:** Describe the cloud density seen in the zoomed sector plots.
+                1. **Analysis:** Describe the cloud density seen in the plots and the microphysics (Radius + Optical Depth).
                 2. **Decision:** **GO** or **NO-GO**?
-                3. **Reasoning:** Scientific justification based on the pressure, probability, radius, and humidity.
+                3. **Reasoning:** Scientific justification based on the 5 metrics.
                 """
                 
                 with st.spinner("Vertex AI is calculating microphysics..."):
                     res = model.generate_content([prompt, zoom_img])
                     
                     decision = "GO" if "GO" in res.text.upper() else "NO-GO"
-                    # LOGGING UPDATED WITH HUMIDITY
-                    log_mission(f"{lat},{lon}", f"Prob:{prob:.1f}% Rad:{radius:.1f}um Hum:{humidity}%", decision, "AI Authorized")
+                    
+                    # LOGGING (Updated string)
+                    log_str = f"P:{prob:.0f}% R:{radius:.1f}um OD:{opt_depth:.1f} H:{humidity}%"
+                    log_mission(f"{lat},{lon}", log_str, decision, "AI Authorized")
                     
                     st.markdown("### 🛰️ Mission Command Report")
                     st.write(res.text)
