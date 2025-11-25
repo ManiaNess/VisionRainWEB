@@ -3,7 +3,7 @@ import google.generativeai as genai
 from PIL import Image
 import numpy as np
 import matplotlib.pyplot as plt
-import matplotlib # Added for safety
+import matplotlib
 import pandas as pd
 import datetime
 import os
@@ -73,12 +73,12 @@ def load_netcdf_data():
             return None
     return None
 
-# --- 2. SCIENTIFIC VISUALIZER (Your Custom Code) ---
+# --- 2. SCIENTIFIC VISUALIZER ---
 def generate_scientific_plots(ds, center_y, center_x, window, title_prefix="Target"):
     """
     Generates the Matplotlib visualization using the user's exact logic.
     """
-    if ds is None: return None, 0, 0, 0 # <--- UPDATED: Returns 4 values now
+    if ds is None: return None, 0, 0, 0 
 
     # 1. Dynamic Dimension Finder
     try:
@@ -107,20 +107,19 @@ def generate_scientific_plots(ds, center_y, center_x, window, title_prefix="Targ
     sat_image = ds['cloud_top_pressure'].isel(**slice_dict)
     ai_mask = (ds['cloud_probability'].isel(**slice_dict))/100
     
-    # --- NEW ADDITION: Extract Radius ---
+    # --- Radius Extraction ---
     if 'cloud_particle_effective_radius' in ds:
         rad_slice = ds['cloud_particle_effective_radius'].isel(**slice_dict)
-        # Convert meters to microns (multiply by 1 million)
         avg_rad = float(rad_slice.mean()) * 1e6 
     else:
         avg_rad = 0.0
-    # ------------------------------------
+    # -------------------------
 
     # Calculate Stats for Telemetry
     avg_press = float(sat_image.mean()) / 100.0 if sat_image.size > 0 else 0
     avg_prob = float(ai_mask.mean()) * 100.0 if ai_mask.size > 0 else 0
 
-    # 4. PLOT (Your exact style)
+    # 4. PLOT
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 7))
     fig.patch.set_facecolor('#0e1117')
 
@@ -151,7 +150,7 @@ def generate_scientific_plots(ds, center_y, center_x, window, title_prefix="Targ
     buf.seek(0)
     plt.close(fig)
     
-    return Image.open(buf), avg_press, avg_prob, avg_rad # <--- UPDATED: Return Radius
+    return Image.open(buf), avg_press, avg_prob, avg_rad
 
 # --- 3. OWM TELEMETRY ---
 def get_weather_telemetry(lat, lon, key):
@@ -212,7 +211,6 @@ with tab1:
     </div>
     """, unsafe_allow_html=True)
     
-    
     c1, c2 = st.columns(2)
     with c1:
         st.info("**Solution:** VisionRain - An AI-driven decision support platform analyzing satellite microphysics for precision seeding.")
@@ -223,10 +221,10 @@ with tab1:
 ds = load_netcdf_data()
 
 if ds:
-    # 1. Generate Full Disk (Global Context) - Unpack 4 values, ignore radius for global view
+    # 1. Generate Full Disk (Global Context)
     full_img, _, _, _ = generate_scientific_plots(ds, 1856, 1856, 1800, title_prefix="Global")
     
-    # 2. Generate Zoomed Sector (Jeddah) - Unpack 4 values including radius
+    # 2. Generate Zoomed Sector (Jeddah)
     zoom_img, pressure, prob, radius = generate_scientific_plots(ds, 2300, 750, 100, title_prefix="Jeddah Sector")
 else:
     st.error("⚠️ NetCDF File Missing. Please upload 'W_XX...nc' to GitHub.")
@@ -256,8 +254,8 @@ with tab2:
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Cloud Probability", f"{prob:.1f}%", "AI Confidence")
     c2.metric("Cloud Top Pressure", f"{pressure:.0f} hPa", "Altitude Proxy")
-    c3.metric("Droplet Radius", f"{radius:.1f} µm", "Stalled Growth") # <--- NEW METRIC ADDED
-    c4.metric("Seeding Status", "ANALYZING", delta="Standby", delta_color="off")
+    c3.metric("Droplet Radius", f"{radius:.1f} µm", "Stalled Growth")
+    c4.metric("Humidity", f"{humidity}%", "Atmospheric Water") # <--- ADDED HUMIDITY HERE
 
 # --- TAB 3: GEMINI FUSION ---
 with tab3:
@@ -267,7 +265,7 @@ with tab3:
     st.markdown("### 🔬 Physics-Informed Logic (The Master Table)")
     table_data = {
         "Parameter": ["Cloud Probability", "Cloud Top Pressure", "Droplet Radius", "Humidity"],
-        "Ideal Range": ["> 70%", "< 700 hPa (High)", "< 14 µm (Stuck)", "> 50%"],
+        "Ideal Range": ["> 70%", "< 700 hPa", "< 14 µm (Stuck)", "> 50%"],
         "Current Value": [f"{prob:.1f}%", f"{pressure:.0f} hPa", f"{radius:.1f} µm", f"{humidity}%"]
     }
     st.table(pd.DataFrame(table_data))
@@ -287,7 +285,6 @@ with tab3:
         else:
             genai.configure(api_key=api_key)
             try:
-                # FIXED: Changed from '2.5' to '1.5' because 2.5 doesn't exist yet
                 model = genai.GenerativeModel('gemini-1.5-flash')
                 
                 # --- THE SUPER PROMPT ---
@@ -312,19 +309,21 @@ with tab3:
                 --- LOGIC ---
                 1. IF Probability > 60% AND Pressure < 800hPa -> "GO" (Cloud is substantial).
                 2. IF Droplet Radius < 14 microns -> "GO" (Cloud is stuck, needs seeding).
-                3. IF Humidity < 30% -> "NO-GO" (Too dry).
+                3. IF Droplet Radius > 14 microns -> "NO-GO" (Already raining).
+                4. IF Humidity < 30% -> "NO-GO" (Too dry).
                 
                 --- OUTPUT ---
-                1. **Analysis:** Describe the cloud density seen in the zoomed sector plots and the Droplet Radius.
+                1. **Analysis:** Describe the cloud density seen in the zoomed sector plots.
                 2. **Decision:** **GO** or **NO-GO**?
-                3. **Reasoning:** Scientific justification based on the pressure, probability, and radius.
+                3. **Reasoning:** Scientific justification based on the pressure, probability, radius, and humidity.
                 """
                 
                 with st.spinner("Vertex AI is calculating microphysics..."):
                     res = model.generate_content([prompt, zoom_img])
                     
                     decision = "GO" if "GO" in res.text.upper() else "NO-GO"
-                    log_mission(f"{lat},{lon}", f"Prob:{prob:.1f}% Rad:{radius:.1f}um", decision, "AI Authorized")
+                    # LOGGING UPDATED WITH HUMIDITY
+                    log_mission(f"{lat},{lon}", f"Prob:{prob:.1f}% Rad:{radius:.1f}um Hum:{humidity}%", decision, "AI Authorized")
                     
                     st.markdown("### 🛰️ Mission Command Report")
                     st.write(res.text)
