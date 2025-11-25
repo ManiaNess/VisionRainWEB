@@ -7,5 +7,3 @@ requests
 folium
 streamlit-folium
 pandas
-xarray
-netCDF4
