@@ -16,7 +16,11 @@ st.set_page_config(page_title="VisionRain | Cloud Command", layout="wide", page_
 @st.cache_resource
 def load_satellite_data():
     # 👇👇👇 PASTE YOUR EXACT FILENAME INSIDE THE QUOTES BELOW 👇👇👇
-    file_path = "C:\Users\nessp\OneDrive\Documents\GitHub\VisionRainWEB\W_XX-EUMETSAT-Darmstadt,OCA+MSG4+SEVIRI_C_EUMG_20190831234500_1_OR_FES_E0000_0100.nc"
+    # WRONG (Do not use this):
+# file_path = "C:\Users\nessp\OneDrive\Documents\GitHub\VisionRainWEB\W_XX..."
+
+# CORRECT (Use this):
+  file_path = "C:\Users\nessp\OneDrive\Documents\GitHub\VisionRainWEB\W_XX-EUMETSAT-Darmstadt,OCA+MSG4+SEVIRI_C_EUMG_20190831234500_1_OR_FES_E0000_0100.nc"
     
     try:
         # We use 'h5netcdf' engine for better performance/compatibility on cloud
