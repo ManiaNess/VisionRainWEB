@@ -1,7 +1,9 @@
-streamlit 
-google-generative-ai 
-xarray 
-netcdf4 
-matplotlib 
-pandas 
+streamlit
+google-generative-ai
+xarray
+netCDF4
+h5netcdf
+matplotlib
+pandas
 plotly
+numpy
