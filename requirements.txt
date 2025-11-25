@@ -9,3 +9,4 @@ streamlit-folium
 pandas
 xarray
 netCDF4
+h5netcdf
