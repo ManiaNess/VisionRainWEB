@@ -7,27 +7,31 @@ import matplotlib.pyplot as plt
 import datetime
 import PIL.Image
 from io import BytesIO
-
-# Use os.path.join to be safe
-import os
-file_path = os.path.join(os.getcwd(), "W_XX-EUMETSAT-Darmstadt,OCA+MSG4+SEVIRI_C_EUMG_20190831234500_1_OR_FES_E0000_0100.nc")
+import os 
 
 # --- 1. APP CONFIGURATION ---
 st.set_page_config(page_title="VisionRain | Cloud Command", layout="wide", page_icon="⛈️")
 
-
 # --- 2. LOAD SATELLITE DATA ---
 @st.cache_resource
 def load_satellite_data():
-    # 👇👇👇 PASTE YOUR EXACT FILENAME INSIDE THE QUOTES BELOW 👇👇👇
-    #file_path = "C:\Users\nessp\OneDrive\Documents\GitHub\VisionRainWEB\W_XX-EUMETSAT-Darmstadt,OCA+MSG4+SEVIRI_C_EUMG_20190831234500_1_OR_FES_E0000_0100.nc"
+    # 1. Define the filename EXACTLY as it is in your folder
+    file_name = "W_XX-EUMETSAT-Darmstadt,OCA+MSG4+SEVIRI_C_EUMG_20190831234500_1_OR_FES_E0000_0100.nc"
     
+    # 2. Build the path dynamically (Works on Windows AND Cloud)
+    file_path = os.path.join(os.getcwd(), file_name)
+    
+    # Debugging: Show us where Python is looking
+    print(f"DEBUG: Looking for file at: {file_path}")
+
     try:
         # We use 'h5netcdf' engine for better performance/compatibility on cloud
         ds = xr.open_dataset(file_path, engine='h5netcdf')
         return ds
     except FileNotFoundError:
-        st.error(f"🚨 FILE NOT FOUND: Could not find '{file_path}'. Make sure it is in the same folder as app.py!")
+        st.error(f"🚨 FILE NOT FOUND: The app could not find '{file_name}'.")
+        st.warning(f"The app is looking in this folder: {os.getcwd()}")
+        st.warning(f"Files found in this folder: {os.listdir(os.getcwd())}")
         return None
     except Exception as e:
         st.error(f"Error loading satellite file: {e}")
