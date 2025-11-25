@@ -269,7 +269,7 @@ with tab3:
         else:
             genai.configure(api_key=api_key)
             try:
-                model = genai.GenerativeModel('gemini-1.5-flash')
+                model = genai.GenerativeModel('gemini-2.5-flash')
                 
                 # --- THE SUPER PROMPT ---
                 prompt = f"""
