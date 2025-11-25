@@ -1,9 +1,9 @@
 streamlit
-google-generative-ai
 xarray
-netCDF4
 h5netcdf
-matplotlib
-pandas
-plotly
 numpy
+pandas
+matplotlib
+google-generative-ai
+plotly
+image
