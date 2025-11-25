@@ -6,4 +6,4 @@ pandas
 matplotlib
 google-generative-ai
 plotly
-image
+Pillow
