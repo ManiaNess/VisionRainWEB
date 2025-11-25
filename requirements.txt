@@ -1,9 +1,11 @@
 streamlit
-xarray
-h5netcdf
+google-generativeai
+pillow
 numpy
-pandas
 matplotlib
-google-generative-ai
-plotly
-Pillow
+requests
+folium
+streamlit-folium
+pandas
+xarray
+netCDF4
