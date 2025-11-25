@@ -24,7 +24,7 @@ WEATHER_API_KEY = "11b260a4212d29eaccbd9754da459059"
 LOG_FILE = "mission_logs.csv"
 NETCDF_FILE = "W_XX-EUMETSAT-Darmstadt,OCA+MSG4+SEVIRI_C_EUMG_20190831234500_1_OR_FES_E0000_0100.nc"
 
-st.set_page_config(page_title="VisionRain | Scientific Core", layout="wide", page_icon="⛈️")
+st.set_page_config(page_title="VisionRain | Scientific Core", layout="wide", page_icon="🛰️")
 
 # --- STYLING ---
 st.markdown("""
@@ -67,10 +67,10 @@ def load_netcdf_data():
             return None
     return None
 
-# --- 2. SCIENTIFIC VISUALIZER (FIXED MATH) ---
+# --- 2. SCIENTIFIC VISUALIZER (Your Custom Code) ---
 def generate_scientific_plots(ds, center_y, center_x, window, title_prefix="Target"):
     """
-    Generates the Matplotlib visualization using masked arrays to fix probability values.
+    Generates the Matplotlib visualization using the user's exact logic.
     """
     if ds is None: return None, 0, 0
 
@@ -80,6 +80,7 @@ def generate_scientific_plots(ds, center_y, center_x, window, title_prefix="Targ
     x_dim_name = dims[1]
 
     # 2. Slicing
+    # Ensure we don't go out of bounds
     max_y = ds.sizes[y_dim_name]
     max_x = ds.sizes[x_dim_name]
     
@@ -93,22 +94,15 @@ def generate_scientific_plots(ds, center_y, center_x, window, title_prefix="Targ
         x_dim_name: slice(x_start, x_end)
     }
 
-    # 3. Extract Data & MASK INVALID VALUES
-    # Cloud Top Pressure (hPa)
-    raw_press = ds['cloud_top_pressure'].isel(**slice_dict).values
-    # Mask values > 1100 (Space/Error) and < 0
-    press_masked = np.where((raw_press > 0) & (raw_press < 1100), raw_press, np.nan)
+    # 3. Extract Data
+    sat_image = ds['cloud_top_pressure'].isel(**slice_dict)
+    ai_mask = ds['cloud_probability'].isel(**slice_dict)
     
-    # Cloud Probability (0-100)
-    raw_prob = ds['cloud_probability'].isel(**slice_dict).values
-    # Mask values > 100 (Space/Error) and < 0
-    prob_masked = np.where((raw_prob >= 0) & (raw_prob <= 100), raw_prob, np.nan)
-    
-    # 4. Calculate Valid Averages (Ignoring NaNs)
-    avg_press = float(np.nanmean(press_masked)) if not np.isnan(np.nanmean(press_masked)) else 0.0
-    avg_prob = float(np.nanmean(prob_masked)) if not np.isnan(np.nanmean(prob_masked)) else 0.0
+    # Calculate Stats for Telemetry
+    avg_press = float(sat_image.mean()) / 100.0 if sat_image.size > 0 else 0
+    avg_prob = float(ai_mask.mean()) * 100.0 if ai_mask.size > 0 else 0
 
-    # 5. PLOT
+    # 4. PLOT (Your exact style)
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 7))
     fig.patch.set_facecolor('#0e1117')
 
@@ -118,13 +112,11 @@ def generate_scientific_plots(ds, center_y, center_x, window, title_prefix="Targ
     ax1.axis('off')
     plt.colorbar(im1, ax=ax1, label="Pressure (Pa)").ax.yaxis.set_tick_params(color='white')
 
-
-
     # Plot 2: AI Detection (Probability)
-    im2 = ax2.imshow(prob_masked, cmap='Blues', vmin=0, vmax=100, origin='upper')
+    im2 = ax2.imshow(ai_mask, cmap='Blues', vmin=0, vmax=1, origin='upper')
     ax2.set_title(f"{title_prefix} AI Identification (Cloud Probability)", fontsize=12, color="white")
     ax2.axis('off')
-    plt.colorbar(im2, ax=ax2, label="Probability %").ax.yaxis.set_tick_params(color='white')
+    plt.colorbar(im2, ax=ax2, label="Probability (0-1)").ax.yaxis.set_tick_params(color='white')
 
     # Add Crosshair
     mid_y = (y_end - y_start) // 2
@@ -244,7 +236,6 @@ with tab2:
     # TELEMETRY TABLE
     st.subheader("Microphysical Telemetry")
     c1, c2, c3, c4 = st.columns(4)
-    # Corrected Probability Format (0.0 - 100.0)
     c1.metric("Cloud Probability", f"{prob:.1f}%", "AI Confidence")
     c2.metric("Cloud Top Pressure", f"{pressure:.0f} hPa", "Altitude Proxy")
     c3.metric("Surface Humidity", f"{humidity}%", "Station Data")
@@ -258,7 +249,7 @@ with tab3:
     st.markdown("### 🔬 Physics-Informed Logic (The Master Table)")
     table_data = {
         "Parameter": ["Cloud Probability", "Cloud Top Pressure", "Humidity", "Visual Structure"],
-        "Ideal Range": ["> 60%", "< 700 hPa (High)", "> 50%", "Convective/Lumpy"],
+        "Ideal Range": ["> 70%", "< 700 hPa (High)", "> 50%", "Convective/Lumpy"],
         "Current Value": [f"{prob:.1f}%", f"{pressure:.0f} hPa", f"{humidity}%", "See Zoom Plot"]
     }
     st.table(pd.DataFrame(table_data))
@@ -303,7 +294,7 @@ with tab3:
                 2. IF Humidity < 30% -> "NO-GO" (Too dry).
                 
                 --- OUTPUT ---
-                1. **Analysis:** Describe the cloud density seen in the plots.
+                1. **Analysis:** Describe the cloud density seen in the zoomed sector plots.
                 2. **Decision:** **GO** or **NO-GO**?
                 3. **Reasoning:** Scientific justification based on the pressure and probability.
                 """
