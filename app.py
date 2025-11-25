@@ -78,7 +78,7 @@ def generate_scientific_plots(ds, center_y, center_x, window, title_prefix="Targ
     """
     Generates the Matplotlib visualization using the user's exact logic.
     """
-    if ds is None: return None, 0, 0, 0, 0 # <--- UPDATED: Returns 5 values now
+    if ds is None: return None, 0, 0, 0, 0 
 
     # 1. Dynamic Dimension Finder
     try:
@@ -114,11 +114,10 @@ def generate_scientific_plots(ds, center_y, center_x, window, title_prefix="Targ
     else:
         avg_rad = 0.0
         
-    # --- 3b. Optical Depth Extraction (New) ---
+    # --- 3b. Optical Depth Extraction ---
     if 'cloud_optical_depth_log' in ds:
         cod_slice = ds['cloud_optical_depth_log'].isel(**slice_dict)
         # File stores as Log10. Convert to Linear: 10^x
-        # We calculate mean of linear values for accuracy
         avg_cod = float((10**cod_slice).mean())
     else:
         avg_cod = 0.0
@@ -158,7 +157,7 @@ def generate_scientific_plots(ds, center_y, center_x, window, title_prefix="Targ
     buf.seek(0)
     plt.close(fig)
     
-    return Image.open(buf), avg_press, avg_prob, avg_rad, avg_cod # <--- UPDATED: Return 5 values
+    return Image.open(buf), avg_press, avg_prob, avg_rad, avg_cod
 
 # --- 3. OWM TELEMETRY ---
 def get_weather_telemetry(lat, lon, key):
@@ -230,11 +229,9 @@ ds = load_netcdf_data()
 
 if ds:
     # 1. Generate Full Disk (Global Context)
-    # We ignore extra metrics for the global view
     full_img, _, _, _, _ = generate_scientific_plots(ds, 1856, 1856, 1800, title_prefix="Global")
     
     # 2. Generate Zoomed Sector (Jeddah)
-    # Unpack all 5 variables
     zoom_img, pressure, prob, radius, opt_depth = generate_scientific_plots(ds, 2300, 750, 100, title_prefix="Jeddah Sector")
 else:
     st.error("⚠️ NetCDF File Missing. Please upload 'W_XX...nc' to GitHub.")
@@ -259,13 +256,13 @@ with tab2:
 
     st.divider()
     
-    # TELEMETRY TABLE (Updated with 5th Metric)
+    # TELEMETRY TABLE
     st.subheader("Microphysical Telemetry")
-    c1, c2, c3, c4, c5 = st.columns(5) # Changed to 5 columns
+    c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("Cloud Probability", f"{prob:.1f}%", "AI Confidence")
     c2.metric("Cloud Top Pressure", f"{pressure:.0f} hPa", "Altitude Proxy")
     c3.metric("Droplet Radius", f"{radius:.1f} µm", "Stalled Growth")
-    c4.metric("Optical Depth", f"{opt_depth:.1f}", "Water Volume") # <--- NEW
+    c4.metric("Optical Depth", f"{opt_depth:.1f}", "Water Volume")
     c5.metric("Humidity", f"{humidity}%", "Atmospheric Water")
 
 # --- TAB 3: GEMINI FUSION ---
@@ -326,7 +323,7 @@ with tab3:
                 5. IF Humidity < 30% -> "NO-GO" (Too dry).
                 
                 --- OUTPUT ---
-                1. **Analysis:** Describe the cloud density seen in the plots and the microphysics (Radius + Optical Depth).
+                1. **Analysis:** Describe the cloud density seen in the zoomed sector plots and the microphysics.
                 2. **Decision:** **GO** or **NO-GO**?
                 3. **Reasoning:** Scientific justification based on the 5 metrics.
                 """
@@ -334,9 +331,18 @@ with tab3:
                 with st.spinner("Vertex AI is calculating microphysics..."):
                     res = model.generate_content([prompt, zoom_img])
                     
-                    decision = "GO" if "GO" in res.text.upper() else "NO-GO"
+                    # --- FIXED LOGIC HERE ---
+                    text_response = res.text.upper()
                     
-                    # LOGGING (Updated string)
+                    if "NO-GO" in text_response:
+                        decision = "NO-GO"
+                    elif "GO" in text_response:
+                        decision = "GO"
+                    else:
+                        decision = "NO-GO" # Fallback
+                    # ------------------------
+                    
+                    # Logging
                     log_str = f"P:{prob:.0f}% R:{radius:.1f}um OD:{opt_depth:.1f} H:{humidity}%"
                     log_mission(f"{lat},{lon}", log_str, decision, "AI Authorized")
                     
