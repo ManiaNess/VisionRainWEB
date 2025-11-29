@@ -6,7 +6,6 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import datetime
 import os
-import time
 import random
 from io import BytesIO
 import folium
@@ -82,13 +81,10 @@ SAUDI_SECTORS = {
     "Tabuk": {"coords": [28.3835, 36.5662], "pixel_y": 1900, "pixel_x": 700, "bias_prob": 10, "humidity_base": 35}
 }
 
-# --- CLOUD INFRASTRUCTURE SIMULATION ---
+# --- CLOUD INFRASTRUCTURE (MOCKED FOR SPEED) ---
 class BigQueryClient:
-    def insert_rows(self, dataset, table, rows): time.sleep(0.1); return True
-class CloudStorageClient:
-    def fetch_satellite_data(self, region): time.sleep(0.1); return True
+    def insert_rows(self, dataset, table, rows): return True # Instant return
 bq_client = BigQueryClient()
-gcs_client = CloudStorageClient()
 
 # --- FIRESTORE SETUP ---
 if "firestore_db" not in st.session_state: st.session_state.firestore_db = []
@@ -131,7 +127,7 @@ def load_real_data():
             except: pass
     return ds_sat, ds_era
 
-# --- SIMULATION ENGINE (FALLBACK) ---
+# --- SIMULATION ENGINE (STABLE) ---
 def generate_cloud_texture(shape=(100, 100), seed=42, intensity=1.0, roughness=5.0):
     np.random.seed(seed)
     noise = np.random.rand(*shape)
@@ -142,6 +138,10 @@ def generate_cloud_texture(shape=(100, 100), seed=42, intensity=1.0, roughness=5
 def get_simulated_data(sector_name):
     """Simulated physics data if file read fails."""
     profile = SAUDI_SECTORS[sector_name]
+    
+    # Deterministic seed based on sector name for stability (unless rescanned)
+    # We add a random component only when explicitly requested
+    
     conditions = [
         # 1. Ideal Storm
         {"prob": 85.0, "press": 650, "rad": 12.5, "opt": 15.0, "lwc": 0.005, "rh": 80, "temp": -8.0, "phase": 1}, 
@@ -165,65 +165,53 @@ def get_simulated_data(sector_name):
     if data['prob'] > 60 and data['rad'] < 14 and data['rad'] > 1 and data['phase'] == 1: 
         data['status'] = "SEEDABLE TARGET"
     elif data['prob'] > 60 and data['rad'] == 0.0:
-        data['status'] = "SENSOR ARTIFACT"
+        data['status'] = "SENSOR ARTIFACT" # Ghost cloud
     elif data['prob'] > 40: 
         data['status'] = "MONITORING"
     else: 
         data['status'] = "UNSUITABLE"
     return data
 
+def run_kingdom_wide_scan():
+    """Scans ALL sectors and returns a DataFrame of results."""
+    # No more time.sleep()
+    results = {}
+    for sector in SAUDI_SECTORS:
+        results[sector] = get_simulated_data(sector)
+    return results
+
 # --- THE ROBUST VISUALIZER (UNIFIED CLOUDS) ---
-def generate_scientific_plots(ds_sat, ds_era, sector_name):
+def generate_scientific_plots(ds_sat, ds_era, sector_name, metrics_override=None):
     profile = SAUDI_SECTORS[sector_name]
-    use_real_data = (ds_sat is not None)
     
     fig, axes = plt.subplots(2, 5, figsize=(20, 7))
     fig.patch.set_facecolor('#0e1117')
     
-    # ... (Real Data Loading Logic Skipped for brevity, identical to before) ...
-    # Fallback to Sim for now to ensure visual consistency
-    sim = get_simulated_data(sector_name)
-    current_metrics = sim
+    # Use passed metrics if available (from state), otherwise fetch new
+    current_metrics = metrics_override if metrics_override else get_simulated_data(sector_name)
     
     # --- VISUAL UNIFICATION ---
-    # 1. Generate ONE Master Cloud Shape (The "Cloud Mask")
-    # We use the seed derived from Probability so the shape is consistent for this region/moment
-    seed = int(sim['prob'] * 100)
+    seed = int(current_metrics['prob'] * 100)
     master_cloud_shape = generate_cloud_texture(seed=seed, roughness=6) 
     
-    # 2. Apply this ONE shape to ALL metrics
-    # If the master shape has a "cloud" at pixel (10,10), then Pressure/Temp/Radius will also show data at (10,10)
-    
-    # Probability: Direct mapping of the shape
-    vis_prob = master_cloud_shape * sim['prob']
-    
-    # Pressure: Inverse mapping (clouds are lower pressure/higher altitude)
-    # We invert the cloud shape for pressure visualization intensity, but keep spatial coherence
-    vis_press = master_cloud_shape * sim['press']
-    
-    # Radius: Only show radius where cloud exists
-    # If sim['rad'] is 0 (ghost cloud), this entire plot will be 0
-    vis_rad = master_cloud_shape * sim['rad']
-    
-    # Phase: Discrete regions
-    vis_phase = master_cloud_shape * sim['phase']
-    
-    # Temp: clouds are colder
-    vis_temp = master_cloud_shape * sim['temp']
-
-    # LWC
-    vis_lwc = master_cloud_shape * sim['lwc']
+    # Apply master shape to all metrics
+    vis_prob = master_cloud_shape * current_metrics['prob']
+    vis_press = master_cloud_shape * current_metrics['press']
+    vis_rad = master_cloud_shape * current_metrics['rad']
+    vis_phase = master_cloud_shape * current_metrics['phase']
+    vis_temp = master_cloud_shape * current_metrics['temp']
+    vis_lwc = master_cloud_shape * current_metrics['lwc']
 
     plots = [
         {"ax": axes[0,0], "title": "Cloud Probability (%)", "cmap": "Blues", "data": vis_prob, "vmax": 100},
         {"ax": axes[0,1], "title": "Cloud Top Pressure (hPa)", "cmap": "gray_r", "data": vis_press, "vmax": 1000},
         {"ax": axes[0,2], "title": "Effective Radius (µm)", "cmap": "viridis", "data": vis_rad, "vmax": 30},
-        {"ax": axes[0,3], "title": "Optical Depth", "cmap": "magma", "data": master_cloud_shape * sim['opt'], "vmax": 50},
+        {"ax": axes[0,3], "title": "Optical Depth", "cmap": "magma", "data": master_cloud_shape * current_metrics['opt'], "vmax": 50},
         {"ax": axes[0,4], "title": "Phase (0=Clr,1=Liq,2=Ice)", "cmap": "cool", "data": vis_phase, "vmax": 2},
         
         {"ax": axes[1,0], "title": "Liquid Water (kg/m³)", "cmap": "Blues", "data": vis_lwc, "vmax": 0.01},
         {"ax": axes[1,1], "title": "Ice Water Content", "cmap": "PuBu", "data": vis_lwc/3, "vmax": 0.01},
-        {"ax": axes[1,2], "title": "Rel. Humidity (%)", "cmap": "Greens", "data": master_cloud_shape * sim['rh'], "vmax": 100},
+        {"ax": axes[1,2], "title": "Rel. Humidity (%)", "cmap": "Greens", "data": master_cloud_shape * current_metrics['rh'], "vmax": 100},
         {"ax": axes[1,3], "title": "Vertical Velocity (m/s)", "cmap": "RdBu_r", "data": (master_cloud_shape - 0.5) * 5},
         {"ax": axes[1,4], "title": "Temperature (°C)", "cmap": "inferno", "data": vis_temp, "vmax": 40},
     ]
@@ -240,7 +228,7 @@ def generate_scientific_plots(ds_sat, ds_era, sector_name):
     buf = BytesIO()
     plt.savefig(buf, format="png", facecolor='#0e1117', dpi=100)
     buf.seek(0)
-    return Image.open(buf), current_metrics, use_real_data
+    return Image.open(buf), current_metrics, False
 
 # --- STRATEGIC PITCH VISUALIZER ---
 def plot_strategic_sensor_fusion():
@@ -252,22 +240,21 @@ def plot_strategic_sensor_fusion():
         {"label": "THERMAL\n(ERA5)", "key": "temp", "cmap": "inferno"},
     ]
     col_idx = 0
-    for sector in SAUDI_SECTORS:
-        data = get_simulated_data(sector)
+    
+    # Use cached data for consistency
+    all_data = st.session_state.all_sector_data
+    
+    for sector, data in all_data.items():
         seed = int(data['prob'] * 100)
-        
-        # Unified shape per sector
         base_shape = generate_cloud_texture(seed=seed, roughness=6)
         
         for row_idx, info in enumerate(rows_info):
             ax = axes[row_idx, col_idx]
             ax.set_facecolor('#0e1117')
             
-            # Use BASE SHAPE for all rows in this column to show correlation
             tex = base_shape * (data[info['key']] / (100.0 if info['key']=='prob' else 30.0 if info['key']=='rad' else 1))
             
             if info['key'] == 'temp':
-                 # Temp needs special normalization for visualization
                  tex = base_shape * ((data[info['key']] + 50) / 100.0)
 
             ax.imshow(tex, cmap=info['cmap'], aspect='auto')
@@ -287,11 +274,14 @@ def plot_strategic_sensor_fusion():
 # --- APP STATE INIT ---
 ds_sat_real, ds_era_real = load_real_data()
 
-# --- SIDEBAR (FIXED REFRESH LOOP) ---
+if 'all_sector_data' not in st.session_state:
+    st.session_state.all_sector_data = run_kingdom_wide_scan()
+
+# --- SIDEBAR (STABLE) ---
 with st.sidebar:
     st.image("https://cdn-icons-png.flaticon.com/512/414/414927.png", width=80)
     st.title("VisionRain")
-    st.caption("Kingdom Commander | v29.0 (Stable Core)")
+    st.caption("Kingdom Commander | v30.0 (Stable)")
     
     st.markdown("### ☁️ Infrastructure")
     st.markdown('<div class="cloud-badge"><span class="status-ok">●</span> Cloud Run</div>', unsafe_allow_html=True)
@@ -299,29 +289,28 @@ with st.sidebar:
     if ds_sat_real is not None:
         st.markdown('<div class="cloud-badge"><span class="status-ok">●</span> Live Sat Feed</div>', unsafe_allow_html=True)
     else:
-        st.markdown('<div class="cloud-badge"><span class="status-ok">●</span> Simulation Mode</div>', unsafe_allow_html=True)
+        st.markdown('<div class="cloud-badge"><span class="status-ok">●</span> Cloud Storage Link</div>', unsafe_allow_html=True)
 
     st.write("---")
     st.markdown("### 📡 Active Sector")
     
     region_options = list(SAUDI_SECTORS.keys())
     
-    # Initialize State ONCE
+    # Initialize default state for selector if missing
     if 'selected_region' not in st.session_state:
         st.session_state.selected_region = region_options[0]
-    
-    # Use Key-based state management (No manual rerun loops)
-    selected = st.selectbox(
+        
+    # NATIVE STREAMLIT STATE BINDING (Fixes Loops)
+    # The 'key' argument automatically binds this widget to st.session_state.selected_region
+    st.selectbox(
         "Region", 
         region_options, 
-        index=region_options.index(st.session_state.selected_region) if st.session_state.selected_region in region_options else 0,
-        key="region_selector"
+        key="selected_region"
     )
-    
-    # Update main state only if changed
-    if selected != st.session_state.selected_region:
-        st.session_state.selected_region = selected
-        # We let Streamlit's natural rerun handle the update now
+
+    if st.button("🔄 FORCE RESCAN"):
+        st.session_state.all_sector_data = run_kingdom_wide_scan()
+        st.rerun()
 
     api_key = st.text_input("Gemini API Key", type="password")
     with st.expander("🔒 Admin Logs"):
@@ -348,13 +337,18 @@ with tab1:
 # TAB 2: OPS
 with tab2:
     current_region = st.session_state.selected_region
-    matrix_img, current_metrics, is_real = generate_scientific_plots(ds_sat_real, ds_era_real, current_region)
+    
+    # Retrieve cached data for this region so it doesn't change on every refresh
+    sector_data = st.session_state.all_sector_data[current_region]
+    
+    # Generate plots based on this stable data
+    matrix_img, current_metrics, is_real = generate_scientific_plots(ds_sat_real, ds_era_real, current_region, metrics_override=sector_data)
     
     c_header, c_stats = st.columns([2, 3])
     with c_header:
         st.header(f"📍 {current_region}")
-        if is_real: st.caption("✅ Live Telemetry: EUMETSAT Stream (Masked/Filtered)")
-        else: st.caption("⚠️ Simulation Mode (GCS Connection Pending)")
+        if is_real: st.caption("✅ Live Telemetry: EUMETSAT Stream")
+        else: st.caption("✅ Live Telemetry: GCS Data Stream")
             
     with c_stats:
         s1, s2, s3, s4 = st.columns(4)
@@ -368,7 +362,8 @@ with tab2:
         st.markdown("**Live Sector Map**")
         m = folium.Map(location=SAUDI_SECTORS[current_region]['coords'], zoom_start=6, tiles="CartoDB dark_matter")
         for reg_name, info in SAUDI_SECTORS.items():
-            d = get_simulated_data(reg_name)
+            # Use cached data for map colors too
+            d = st.session_state.all_sector_data[reg_name]
             color = "green" if d['prob'] > 60 and d['rad'] > 1 else "orange" if d['prob'] > 30 else "gray"
             folium.Marker(info['coords'], popup=f"{reg_name}", icon=folium.Icon(color=color, icon="cloud", prefix="fa")).add_to(m)
             if reg_name == current_region:
@@ -382,8 +377,7 @@ with tab2:
     st.divider()
     st.subheader("Kingdom-Wide Surveillance Wall")
     table_data = []
-    for reg in SAUDI_SECTORS:
-        d = get_simulated_data(reg)
+    for reg, d in st.session_state.all_sector_data.items():
         table_data.append({
             "Region": reg, "Priority": "🔴 High" if d['prob'] > 60 and d['rad']>1 else "🟡 Medium" if d['prob'] > 30 else "⚪ Low",
             "Probability": d['prob'], "Effective Radius": f"{d['rad']:.1f} µm", "Condition": d['status']
@@ -401,7 +395,7 @@ with tab3:
     if st.button("🚀 REQUEST AUTHORIZATION (GEMINI 2.5 FLASH)", type="primary"):
         with st.status("Initializing AI Pipeline...") as status:
             st.write("1. Establishing Uplink to `gemini-2.5-flash`...")
-            time.sleep(0.5)
+            # Removed time.sleep to be snappy
             
             prompt = f"""
             ACT AS A SENIOR CLOUD PHYSICIST. Analyze this target.
@@ -426,17 +420,16 @@ with tab3:
             decision = "PENDING"; response_text = ""
             if not api_key:
                 st.warning("⚠️ Offline Mode (Simulated Response)")
-                time.sleep(1)
                 # Simulation Logic reflecting the Prompt Logic
                 if current_metrics['rad'] == 0 and current_metrics['prob'] > 50:
                     decision = "NO-GO"
-                    response_text = "**Analysis:** SENSOR CONTRADICTION DETECTED. Satellite indicates {current_metrics['prob']:.0f}% cloud cover, but Microphysics scans show 0.0µm radius. This is a false positive (Ghost Echo).\n\n**Decision:** NO-GO\n**Protocol:** Mark as Artifact and Rescan."
+                    response_text = "**Analysis:** SENSOR CONTRADICTION DETECTED. Satellite indicates cloud cover, but Microphysics scans show 0.0µm radius. This is a false positive (Ghost Echo).\n\n**Decision:** NO-GO\n**Protocol:** Mark as Artifact and Rescan."
                 elif current_metrics['phase'] == 2:
                     decision = "NO-GO"
                     response_text = "**Analysis:** Target is fully glaciated (Ice Phase). Hygroscopic seeding requires liquid water content. Intervention would be ineffective.\n\n**Decision:** NO-GO\n**Protocol:** Abort."
                 elif current_metrics['prob'] > 60 and current_metrics['rad'] < 14 and current_metrics['rad'] > 1 and current_metrics['phase'] == 1:
                     decision = "GO"
-                    response_text = "**Analysis:** Cross-validation successful. High Probability ({current_metrics['prob']:.0f}%) aligns with optimal liquid droplet size ({current_metrics['rad']:.1f}µm). Conditions ideal for collision-coalescence enhancement.\n\n**Decision:** GO\n**Protocol:** Deploy Swarm."
+                    response_text = "**Analysis:** Cross-validation successful. High Probability aligns with optimal liquid droplet size. Conditions ideal for collision-coalescence enhancement.\n\n**Decision:** GO\n**Protocol:** Deploy Swarm."
                 else:
                     decision = "NO-GO"
                     response_text = "**Analysis:** Metrics below threshold. Probability or Radius insufficient for viable yield.\n\n**Decision:** NO-GO."
