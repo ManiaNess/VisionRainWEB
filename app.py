@@ -12,6 +12,7 @@ from scipy.ndimage import gaussian_filter
 import json
 import folium
 from streamlit_folium import st_folium
+import datetime
 
 # --- PAGE CONFIG ---
 st.set_page_config(page_title="VisionRain | Kingdom Commander", layout="wide", page_icon="⛈️")
@@ -58,28 +59,37 @@ except Exception as e:
     GEE_ACTIVE = False
     AUTH_ERROR = str(e)
 
-# --- DATA ENGINE (Stable GEE Band Mapping) ---
+# --- DATA ENGINE (Optimized GEE Query) ---
 @st.cache_data(ttl=600)
 def get_data(lat, lon):
-    # This is the fail-safe return when GEE is offline or crashes
     if not GEE_ACTIVE:
         return {"Temp": 30, "Pressure": 750, "Radius": 10, "OptDepth": 15, "Phase": 1, "LiquidWater": 0.005, "IceWater": 0.001, "Humidity": 70, "VertVel": 2.0, "Source": "SIMULATION (Auth Failed)"}
 
     try:
         point = ee.Geometry.Point([lon, lat])
         
-        # 1. ERA5 Full (Atmospheric Variables) - STABLE
-        era5 = ee.ImageCollection("ECMWF/ERA5/HOURLY").filterDate('2024-01-01', '2024-01-31').first() 
+        # Define recent time range (Past week)
+        end_date = datetime.datetime.now()
+        start_date = end_date - datetime.timedelta(days=7)
         
-        # 2. MODIS Collection 6.1 (Cloud Microphysics) - NEW STABLE ASSET
-        modis = ee.ImageCollection("MODIS/061/MOD06_L2").filterDate('2024-01-01', '2024-01-31').first()
+        # 1. ERA5 Full (Atmospheric Variables) - Use LAST available image in the past week
+        era5_collection = ee.ImageCollection("ECMWF/ERA5/HOURLY")\
+            .filterDate(start_date.strftime('%Y-%m-%d'), end_date.strftime('%Y-%m-%d'))
+        era5 = era5_collection.sort('system:time_start', False).first()
         
-        # Select Bands (Fixed names)
-        era5_bands = era5.select('temperature_2m', 'relative_humidity_850hPa', 'vertical_velocity_850hPa')
+        # 2. MODIS (Cloud Microphysics) - Use LAST available image in the past week
+        modis_collection = ee.ImageCollection("MODIS/061/MOD06_L2")\
+            .filterDate(start_date.strftime('%Y-%m-%d'), end_date.strftime('%Y-%m-%d'))
+        modis = modis_collection.sort('system:time_start', False).first()
+        
+        # If no image is found in 7 days, this will error safely to the except block
+        
+        era5_bands = era5.select('temperature_2m', 'vertical_velocity_850hPa', 'relative_humidity_850hPa')
         modis_bands = modis.select('Cloud_Effective_Radius', 'Cloud_Top_Pressure', 'Cloud_Optical_Thickness')
 
         combined = era5_bands.addBands(modis_bands)
-        val = combined.reduceRegion(ee.Reducer.mean(), point, 5000).getInfo()
+        # Use unmask() to ensure null values are zero instead of causing a crash
+        val = combined.unmask(0).reduceRegion(ee.Reducer.mean(), point, 5000).getInfo()
         
         # --- EXTRACTING REAL GEE DATA ---
         temp = (val.get('temperature_2m', 300) - 273.15)
@@ -87,9 +97,9 @@ def get_data(lat, lon):
         pressure = val.get('Cloud_Top_Pressure', 700) or 700
         opt_depth = val.get('Cloud_Optical_Thickness', 10) or 10
         vert_vel = val.get('vertical_velocity_850hPa', 0) or 0
-        humidity = val.get('relative_humidity_850hPa', 50) or 50 # % at 850hPa
+        humidity = val.get('relative_humidity_850hPa', 50) or 50 
 
-        # --- DERIVED LOGIC (Based on Real Data) ---
+        # --- DERIVED LOGIC (Physically based on GEE Data) ---
         cloud_water_path = (rad * opt_depth * 0.001) if rad > 0 else 0 
         
         return {
@@ -97,28 +107,26 @@ def get_data(lat, lon):
             "Pressure": pressure,
             "Radius": rad,
             "OptDepth": opt_depth,
-            "Phase": 1 if temp > -10 else 2, # Proxy using Temp
+            "Phase": 1 if temp > -10 else 2,
             "LiquidWater": cloud_water_path * 0.75, 
             "IceWater": cloud_water_path * 0.25,
             "Humidity": humidity,
             "VertVel": vert_vel * -100,
-            "Source": "ERA5/MODIS 6.1 (Active)"
+            "Source": "ERA5/MODIS (Live)"
         }
     except Exception as e:
-        # Returns specific GEE error message to the dashboard
-        return {"Temp": 0, "Pressure": 0, "Radius": 0, "OptDepth": 0, "Phase": 0, "LiquidWater": 0, "IceWater": 0, "Humidity": 0, "VertVel": 0, "Source": f"RUNTIME ERROR: {str(e)}"}
+        # Fallback to zeros only on fatal runtime error (and show the actual error in Source)
+        return {"Temp": 0, "Pressure": 0, "Radius": 0, "OptDepth": 0, "Phase": 0, "LiquidWater": 0, "IceWater": 0, "Humidity": 0, "VertVel": 0, "Source": f"GEE CRASH: {str(e)}"}
 
 # --- VISUALIZATION ENGINE (Numerical 2x5 Matrix Display) ---
 def plot_scientific_matrix(data_points):
     """Generates the 2x5 layout using only numerical metrics (No Simulation)"""
     plots_config = [
-        # ROW 1: SATELLITE / OPTICAL
         {"title": "Cloud Probability (%)", "value_key": "Prob", "unit": "%"},
         {"title": "Cloud Top Pressure (hPa)", "value_key": "Pressure", "unit": " hPa"},
         {"title": "Effective Radius (µm)", "value_key": "Radius", "unit": " µm"},
         {"title": "Optical Depth", "value_key": "OptDepth", "unit": ""},
         {"title": "Phase (1=Liq, 2=Ice)", "value_key": "Phase", "unit": ""},
-        # ROW 2: ERA5 / INTERNAL PHYSICS
         {"title": "Liquid Water (kg/m³)", "value_key": "LiquidWater", "unit": ""},
         {"title": "Ice Water Content", "value_key": "IceWater", "unit": ""},
         {"title": "Rel. Humidity (%)", "value_key": "Humidity", "unit": "%"},
@@ -128,17 +136,20 @@ def plot_scientific_matrix(data_points):
     
     data_points["Prob"] = 100 if data_points["Radius"] > 5 and data_points["Phase"] == 1 else 10
 
-    cols = st.columns(5)
-    
-    for i, p in enumerate(plots_config):
-        col = cols[i % 5]
-        value = data_points.get(p["value_key"], 0)
-        
-        col.metric(
-            label=p["title"],
-            value=f"{value:.2f}{p['unit']}",
-            delta="SEEDABLE" if p["value_key"] == "Radius" and value > 5 and value < 14 else None
-        )
+    # Display Metrics in 2 rows of 5
+    for row in range(2):
+        cols = st.columns(5)
+        for i in range(5):
+            idx = row * 5 + i
+            if idx < len(plots_config):
+                p = plots_config[idx]
+                value = data_points.get(p["value_key"], 0)
+                
+                cols[i].metric(
+                    label=p["title"],
+                    value=f"{value:.2f}{p['unit']}",
+                    delta="GO" if p["value_key"] == "Radius" and value > 5 and value < 14 else None
+                )
     return None 
 # -----------------------------------------------
 
