@@ -1,322 +1,359 @@
 import streamlit as st
 import google.generativeai as genai
-import xarray as xr
+from PIL import Image
 import numpy as np
-import pandas as pd
 import matplotlib.pyplot as plt
+import matplotlib
+import pandas as pd
 import datetime
-import PIL.Image
+import os
+import csv
+import requests
 from io import BytesIO
+import random
 
-# --- 1. APP CONFIGURATION ---
-st.set_page_config(page_title="VisionRain | Cloud Command", layout="wide", page_icon="⛈️")
+# --- FIX MATPLOTLIB CRASH ON WEB ---
+matplotlib.use('Agg')
 
+# --- SAFELY IMPORT SCIENTIFIC LIBS ---
+try:
+    import xarray as xr
+except ImportError:
+    st.error("⚠️ Scientific Libraries Missing! Please update requirements.txt with: xarray, netCDF4, h5netcdf")
+    xr = None
 
-# --- 2. LOAD SATELLITE DATA ---
-@st.cache_resource
-def load_satellite_data():
-    # 👇👇👇 PASTE YOUR EXACT FILENAME INSIDE THE QUOTES BELOW 👇👇👇
-    # WRONG (Do not use this):
-# file_path = "C:\Users\nessp\OneDrive\Documents\GitHub\VisionRainWEB\W_XX..."
+# --- CONFIGURATION ---
+DEFAULT_API_KEY = "" 
+WEATHER_API_KEY = "11b260a4212d29eaccbd9754da459059" 
+LOG_FILE = "mission_logs.csv"
+NETCDF_FILE = "W_XX-EUMETSAT-Darmstadt,OCA+MSG4+SEVIRI_C_EUMG_20190831234500_1_OR_FES_E0000_0100.nc"
 
-# CORRECT (Use this):
-  file_path = "C:\Users\nessp\OneDrive\Documents\GitHub\VisionRainWEB\W_XX-EUMETSAT-Darmstadt,OCA+MSG4+SEVIRI_C_EUMG_20190831234500_1_OR_FES_E0000_0100.nc"
-    
-    try:
-        # We use 'h5netcdf' engine for better performance/compatibility on cloud
-        ds = xr.open_dataset(file_path, engine='h5netcdf')
-        return ds
-    except FileNotFoundError:
-        st.error(f"🚨 FILE NOT FOUND: Could not find '{file_path}'. Make sure it is in the same folder as app.py!")
-        return None
-    except Exception as e:
-        st.error(f"Error loading satellite file: {e}")
-        return None
+st.set_page_config(page_title="VisionRain | Scientific Core", layout="wide", page_icon="🛰️")
 
-ds = load_satellite_data()
-
-# --- 3. STYLING (Command Center Aesthetic) ---
+# --- STYLING ---
 st.markdown("""
     <style>
-    .stApp {background-color: #0e1117;}
-    h1, h2, h3 {font-family: 'Courier New', monospace; color: #00FFCC;}
-    .metric-box {
-        background-color: #1c212c;
-        border: 1px solid #333;
+    .stApp {background-color: #0a0a0a;}
+    h1 {color: #00e5ff; font-family: 'Helvetica Neue', sans-serif;}
+    h2, h3 {color: #e0e0e0;}
+    .stMetric {
+        background-color: #1a1a1a; 
+        border: 1px solid #333; 
+        border-radius: 12px; 
         padding: 15px;
-        border-radius: 8px;
-        text-align: center;
-        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
     }
-    .metric-value {font-size: 26px; font-weight: bold; color: #00FFCC;}
-    .metric-label {font-size: 14px; color: #aaa; text-transform: uppercase; letter-spacing: 1px;}
-    .success-box {border: 1px solid #00FF00; background-color: rgba(0,255,0,0.1); padding: 10px; border-radius: 5px; color: #00FF00;}
+    .pitch-box {
+        background: linear-gradient(145deg, #1e1e1e, #252525);
+        padding: 25px;
+        border-radius: 15px;
+        border-left: 6px solid #00e5ff;
+        margin-bottom: 20px;
+    }
+    .success-box {
+        background-color: rgba(0, 255, 128, 0.1); 
+        border: 1px solid #00ff80; 
+        color: #00ff80; 
+        padding: 15px; 
+        border-radius: 10px;
+    }
     </style>
     """, unsafe_allow_html=True)
 
-# --- 4. DATA PROCESSING FUNCTIONS ---
+# --- 1. DATA LOADER ---
+@st.cache_resource
+def load_netcdf_data():
+    if xr is None: return None
+    # Use os.path.join to ensure it finds the file on Cloud/Windows
+    file_path = os.path.join(os.getcwd(), NETCDF_FILE)
+    if os.path.exists(file_path):
+        try:
+            return xr.open_dataset(file_path, engine='netcdf4')
+        except Exception as e:
+            st.error(f"Error reading NetCDF: {e}")
+            return None
+    return None
 
-def get_pixel_data(city_name, ds):
+# --- 2. SCIENTIFIC VISUALIZER ---
+def generate_scientific_plots(ds, center_y, center_x, window, title_prefix="Target"):
     """
-    Finds the specific pixel in the satellite file for the chosen target.
+    Generates the Matplotlib visualization using the user's exact logic.
     """
-    if ds is None: return None
+    if ds is None: return None, 0, 0, 0, 0 
 
-    # COORDINATE MAPPING (The "Demo Magic")
-    # We map "Target Sector X" to a storm location south of Jeddah
-    if city_name == "Target Sector X (Demo)":
-        y, x = 2300, 750  # <-- THE STORM PIXEL
-        lat, lon = 16.5, 42.5
-    elif city_name == "Jeddah":
-        y, x = 2589, 668  # Jeddah Pixel
-        lat, lon = 21.54, 39.17
-    elif city_name == "Riyadh":
-        y, x = 2500, 700  # Approx Riyadh Pixel
-        lat, lon = 24.71, 46.67
-    else:
-        y, x = 2500, 700
-        lat, lon = 0.0, 0.0
-
+    # 1. Dynamic Dimension Finder
     try:
-        # Extract the specific pixel data
-        data = ds.isel(number_of_lines=y, number_of_pixels=x)
-        
-        # --- PARSE SCIENTIFIC VARIABLES ---
-        # 1. Pressure (Proxy for Phase)
-        # Low Pressure (<450hPa) = Ice/High Cloud
-        # High Pressure (>600hPa) = Liquid/Low Cloud
-        if 'cloud_top_pressure' in data:
-            pressure = float(data['cloud_top_pressure'].values)
-        else:
-            pressure = 101300.0 # Default Sea Level
-            
-        if pressure > 60000: phase = "LIQUID (Warm)"
-        elif pressure < 45000: phase = "ICE (Glaciated)"
-        else: phase = "MIXED / UNCERTAIN"
-        
-        # 2. Effective Radius (Droplet Size)
-        # Target: < 14 microns (means droplets are small and "stuck")
-        if 'cloud_particle_effective_radius' in data:
-            rad_m = float(data['cloud_particle_effective_radius'].values)
-            rad_um = rad_m * 1e6 if not np.isnan(rad_m) else 0.0
-        else:
-            rad_um = 0.0
-            
-        # 3. Optical Depth (Thickness)
-        if 'cloud_optical_depth_log' in data:
-            cod_log = float(data['cloud_optical_depth_log'].values)
-            cod = 10**cod_log if not np.isnan(cod_log) else 0.0
-        else:
-            cod = 0.0
-            
-        # 4. Cloud Probability
-        if 'cloud_probability' in data:
-            prob = float(data['cloud_probability'].values)
-        else:
-            prob = 0.0
+        dims = list(ds['cloud_probability'].dims)
+        y_dim_name = dims[0]
+        x_dim_name = dims[1]
+    except:
+        return None, 0, 0, 0, 0
 
-        return {
-            "lat": lat, "lon": lon,
-            "phase": phase,
-            "radius": round(rad_um, 1),
-            "optical_depth": round(cod, 1),
-            "pressure": round(pressure/100, 0), # hPa
-            "prob": round(prob * 100, 1),
-            "y_idx": y, "x_idx": x
-        }
-    except Exception as e:
-        st.error(f"Pixel Extraction Error: {e}")
-        return None
-
-def generate_satellite_image(ds, y_center, x_center):
-    """Generates the 'Thermal' view using Cloud Top Pressure."""
-    window = 100 # Zoom level
-    y_slice = slice(y_center - window, y_center + window)
-    x_slice = slice(x_center - window, x_center + window)
+    # 2. Slicing
+    # Ensure we don't go out of bounds
+    max_y = ds.sizes[y_dim_name]
+    max_x = ds.sizes[x_dim_name]
     
-    # Extract image patch
-    if 'cloud_top_pressure' in ds:
-        img_data = ds['cloud_top_pressure'].isel(number_of_lines=y_slice, number_of_pixels=x_slice).values
-    else:
-        img_data = np.zeros((200, 200))
+    y_start = max(0, center_y - window)
+    y_end = min(max_y, center_y + window)
+    x_start = max(0, center_x - window)
+    x_end = min(max_x, center_x + window)
 
-    # Render with Matplotlib
-    plt.figure(figsize=(5, 5))
-    # cmap='gray_r' (Reversed Gray) makes Low Pressure (Clouds) = White, High Pressure (Ground) = Dark
-    plt.imshow(img_data, cmap='gray_r') 
-    plt.axis('off')
-    
-    # Save to memory buffer
-    buf = BytesIO()
-    plt.savefig(buf, format="png", bbox_inches='tight', pad_inches=0)
-    buf.seek(0)
-    return buf
-
-def log_to_bigquery(data_dict):
-    """Simulates logging data to BigQuery for Admin review."""
-    if 'log_df' not in st.session_state:
-        st.session_state['log_df'] = pd.DataFrame(columns=["Timestamp", "Location", "Phase", "Radius", "Status"])
-    
-    new_row = {
-        "Timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "Location": f"{data_dict['lat']}N, {data_dict['lon']}E",
-        "Phase": data_dict['phase'],
-        "Radius": f"{data_dict['radius']} µm",
-        "Status": "SCANNED"
+    slice_dict = {
+        y_dim_name: slice(y_start, y_end),
+        x_dim_name: slice(x_start, x_end)
     }
-    # Use concat instead of append (Pandas 2.0 best practice)
-    st.session_state['log_df'] = pd.concat([st.session_state['log_df'], pd.DataFrame([new_row])], ignore_index=True)
 
-# --- 5. SIDEBAR UI ---
+    # 3. Extract Data
+    sat_image = ds['cloud_top_pressure'].isel(**slice_dict)
+    ai_mask = (ds['cloud_probability'].isel(**slice_dict))/100
+    
+    # --- 3a. Radius Extraction ---
+    if 'cloud_particle_effective_radius' in ds:
+        rad_slice = ds['cloud_particle_effective_radius'].isel(**slice_dict)
+        avg_rad = float(rad_slice.mean()) * 1e6 
+    else:
+        avg_rad = 0.0
+        
+    # --- 3b. Optical Depth Extraction ---
+    if 'cloud_optical_depth_log' in ds:
+        cod_slice = ds['cloud_optical_depth_log'].isel(**slice_dict)
+        # File stores as Log10. Convert to Linear: 10^x
+        avg_cod = float((10**cod_slice).mean())
+    else:
+        avg_cod = 0.0
+
+    # Calculate Stats for Telemetry
+    avg_press = float(sat_image.mean()) / 100.0 if sat_image.size > 0 else 0
+    avg_prob = float(ai_mask.mean()) * 100.0 if ai_mask.size > 0 else 0
+
+    # 4. PLOT
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 7))
+    fig.patch.set_facecolor('#0e1117')
+
+    # Plot 1: Satellite Feed (Pressure)
+    im1 = ax1.imshow(sat_image, cmap='gray_r', origin='upper')
+    ax1.set_title(f"{title_prefix} Satellite Feed (Cloud Top Pressure)", fontsize=12, color="white")
+    ax1.axis('off')
+    plt.colorbar(im1, ax=ax1, label="Pressure (Pa)").ax.yaxis.set_tick_params(color='white')
+
+    # Plot 2: AI Detection (Probability)
+    im2 = ax2.imshow(ai_mask, cmap='Blues', vmin=0, vmax=1, origin='upper')
+    ax2.set_title(f"{title_prefix} AI Identification (Cloud Probability)", fontsize=12, color="white")
+    ax2.axis('off')
+    plt.colorbar(im2, ax=ax2, label="Probability (0-1)").ax.yaxis.set_tick_params(color='white')
+
+    # Add Crosshair
+    mid_y = (y_end - y_start) // 2
+    mid_x = (x_end - x_start) // 2
+    ax1.plot(mid_x, mid_y, 'c+', markersize=20, markeredgewidth=3)
+    ax2.plot(mid_x, mid_y, 'r+', markersize=20, markeredgewidth=3)
+
+    plt.suptitle(f"System Lock: {center_x}X / {center_y}Y", fontsize=16, fontweight='bold', color="#00e5ff")
+    plt.tight_layout()
+    
+    # Save to Buffer
+    buf = BytesIO()
+    plt.savefig(buf, format="png", facecolor='#0e1117')
+    buf.seek(0)
+    plt.close(fig)
+    
+    return Image.open(buf), avg_press, avg_prob, avg_rad, avg_cod
+
+# --- 3. OWM TELEMETRY ---
+def get_weather_telemetry(lat, lon, key):
+    if not key: return None
+    try:
+        url = f"https://api.openweathermap.org/data/2.5/weather?lat={lat}&lon={lon}&appid={key}&units=metric"
+        return requests.get(url).json()
+    except: return None
+
+# --- 4. LOGGING ---
+def log_mission(location, conditions, decision, reason):
+    ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    file_exists = os.path.isfile(LOG_FILE)
+    with open(LOG_FILE, mode='a', newline='') as f:
+        writer = csv.writer(f)
+        if not file_exists: writer.writerow(["Timestamp", "Location", "Conditions", "Decision", "Reason"])
+        writer.writerow([ts, location, conditions, decision, reason])
+
+def load_logs():
+    if os.path.isfile(LOG_FILE): return pd.read_csv(LOG_FILE)
+    return pd.DataFrame(columns=["Timestamp", "Location", "Conditions", "Decision", "Reason"])
+
+# --- SIDEBAR ---
 with st.sidebar:
-    st.image("https://cdn-icons-png.flaticon.com/512/2011/2011601.png", width=80)
-    st.title("VisionRain Hub")
-    st.caption("Google Cloud x KFUPM | Prototype v3")
+    st.image("https://cdn-icons-png.flaticon.com/512/414/414927.png", width=90)
+    st.title("VisionRain")
+    st.caption("Scientific Core | EUMETSAT")
     
-    api_key = st.text_input("Gemini API Key", type="password")
+    api_key = st.text_input("Google AI Key", value=DEFAULT_API_KEY, type="password")
     
-    st.markdown("---")
-    st.markdown("### 🎯 Target Selection")
+    st.markdown("### 📍 Mission Target")
+    st.info("Locked Sector: **Jeddah Storm**")
+    lat, lon = 21.54, 39.17
     
-    # SELECTION LOGIC
-    target_city = st.selectbox("Select Mission Sector", ["Jeddah", "Riyadh", "Target Sector X (Demo)"])
-    
-    if st.button("🛰️ ACQUIRE TARGET"):
-        st.session_state['target_city'] = target_city
-        st.session_state['scan_data'] = get_pixel_data(target_city, ds)
-        st.rerun() # Refresh page to show data
+    # Admin
+    with st.expander("🔒 Admin Portal"):
+        if st.text_input("Password", type="password") == "123456":
+            st.dataframe(load_logs())
+            if st.button("Clear Logs"):
+                if os.path.exists(LOG_FILE): os.remove(LOG_FILE)
+                st.rerun()
 
-# --- 6. MAIN DASHBOARD UI ---
-st.title("📡 VisionRain: Ionization Command Center")
+# --- MAIN UI ---
+st.title("VisionRain Command Center")
+st.markdown("### *Data Source: EUMETSAT NetCDF (Raw Analysis)*")
 
-tab_pitch, tab_data, tab_ai, tab_admin = st.tabs(["💡 Initiative", "📊 Satellite Telemetry", "🤖 Gemini Analysis", "📝 Admin Logs"])
+tab1, tab2, tab3 = st.tabs(["🌍 Strategic Vision", "📡 Sensor Array", "🧠 Gemini Fusion"])
 
 # --- TAB 1: PITCH ---
-with tab_pitch:
-    st.markdown("## 🇸🇦 VisionRain: The Future of Water Security")
+with tab1:
+    st.header("Strategic Framework")
     st.markdown("""
-    **VisionRain** leverages **Google Cloud + Meteosat AI** to revolutionize cloud seeding.
+    <div class="pitch-box">
+    <h3>🚨 1. Problem Statement</h3>
+    <p>Globally, regions such as <b>Saudi Arabia</b> face escalating environmental crises: water scarcity, prolonged droughts, and wildfire escalation. 
+    Current cloud seeding operations are <b>manual, expensive ($8k/hr), and reactive</b>.</p>
+    <p>This aligns critically with <b>Saudi Vision 2030</b> and the <b>Saudi Green Initiative</b>.</p>
+    </div>
+    """, unsafe_allow_html=True)
     
-    Instead of 'spray and pray', we use **Microphysical Data** to target clouds that are physically ready to rain but need an ionic 'nudge'.
+    c1, c2 = st.columns(2)
+    with c1:
+        st.info("**Solution:** VisionRain - An AI-driven decision support platform analyzing satellite microphysics for precision seeding.")
+    with c2:
+        st.success("**Impact:** Enables low-cost, safer deployment and scales globally to support emergency climate-response.")
+
+# --- DATA PROCESSING ---
+ds = load_netcdf_data()
+
+if ds:
+    # 1. Generate Full Disk (Global Context)
+    full_img, _, _, _, _ = generate_scientific_plots(ds, 1856, 1856, 1800, title_prefix="Global")
     
-    ### The Science:
-    * **Phase Discrimination:** We target **Liquid/Mixed** clouds (Ice clouds cannot be seeded).
-    * **Droplet Analysis:** We look for droplets < 14 microns (Stalled Coalescence).
-    * **AI Validation:** Gemini validates the convective structure visually.
-    """)
-    st.info("System Status: OPERATIONAL | Data Source: EUMETSAT Meteosat-9 (IODC)")
+    # 2. Generate Zoomed Sector (Jeddah)
+    zoom_img, pressure, prob, radius, opt_depth = generate_scientific_plots(ds, 2300, 750, 100, title_prefix="Jeddah Sector")
+else:
+    st.error("⚠️ NetCDF File Missing. Please upload 'W_XX...nc' to GitHub.")
+    full_img, zoom_img, pressure, prob, radius, opt_depth = None, None, 0, 0, 0, 0
 
-# --- TAB 2: DATA DASHBOARD ---
-with tab_data:
-    if 'scan_data' in st.session_state and st.session_state['scan_data']:
-        data = st.session_state['scan_data']
-        
-        st.markdown(f"### 📍 Live Feed: {st.session_state['target_city']}")
-        st.caption(f"Coordinates: {data['lat']}N, {data['lon']}E | Source: Meteosat-9 (IODC)")
-        
-        # METRICS ROW
-        c1, c2, c3, c4 = st.columns(4)
-        with c1:
-            st.markdown(f"<div class='metric-box'><div class='metric-label'>Cloud Phase</div><div class='metric-value'>{data['phase']}</div></div>", unsafe_allow_html=True)
-        with c2:
-            st.markdown(f"<div class='metric-box'><div class='metric-label'>Droplet Radius</div><div class='metric-value'>{data['radius']} µm</div></div>", unsafe_allow_html=True)
-        with c3:
-            st.markdown(f"<div class='metric-box'><div class='metric-label'>Optical Depth</div><div class='metric-value'>{data['optical_depth']}</div></div>", unsafe_allow_html=True)
-        with c4:
-            st.markdown(f"<div class='metric-box'><div class='metric-label'>Probability</div><div class='metric-value'>{data['prob']}%</div></div>", unsafe_allow_html=True)
-            
-        st.divider()
-        
-        # VISUALS ROW
-        col_img, col_table = st.columns([1, 1.5])
-        
-        with col_img:
-            st.markdown("#### 🔭 Satellite Thermal View")
-            img_buf = generate_satellite_image(ds, data['y_idx'], data['x_idx'])
-            st.image(img_buf, caption="Processed Cloud Top Pressure (Dark=Ground, White=Cloud)", use_column_width=True)
-            st.session_state['current_image'] = img_buf # Save for AI
-            
-        with col_table:
-            st.markdown("#### 📋 Seeding Viability Check")
-            # Logic for Checkmarks
-            phase_check = "✅" if "LIQUID" in data['phase'] else "❌"
-            rad_check = "✅" if 0 < data['radius'] < 14 else "❌"
-            prob_check = "✅" if data['prob'] > 50 else "❌"
-            
-            df_check = pd.DataFrame({
-                "Parameter": ["Cloud Phase", "Droplet Size", "Cloud Presence"],
-                "Ideal Condition": ["Liquid / Mixed", "< 14 Microns (Stuck)", "> 50% Probability"],
-                "Actual Value": [data['phase'], f"{data['radius']} µm", f"{data['prob']}%"],
-                "Status": [phase_check, rad_check, prob_check]
-            })
-            st.table(df_check)
+# Get Live OWM Data
+w = get_weather_telemetry(lat, lon, WEATHER_API_KEY)
+humidity = w['main']['humidity'] if w else 65 
 
-        log_to_bigquery(data)
-
-    else:
-        st.info("👈 Please select a target city and click 'ACQUIRE TARGET' in the sidebar.")
-
-# --- TAB 3: AI ANALYSIS ---
-with tab_ai:
-    st.header("Gemini 2.0 Decision Engine")
+# --- TAB 2: SENSORS ---
+with tab2:
+    st.header("Real-Time Hydro-Meteorological Fusion")
     
-    if 'scan_data' in st.session_state and 'current_image' in st.session_state:
-        data = st.session_state['scan_data']
-        
-        st.markdown("The AI will now fuse the Visual Data with the Numerical Telemetry to make a final Go/No-Go decision.")
-        
-        if st.button("🚀 REQUEST LAUNCH AUTHORIZATION", type="primary"):
-            if not api_key:
-                st.error("⚠️ Please enter Gemini API Key in the Sidebar first.")
-            else:
-                try:
-                    genai.configure(api_key=api_key)
-                    model = genai.GenerativeModel('gemini-1.5-flash')
-                    
-                    # Prepare Image
-                    img = st.session_state['current_image']
-                    img_pil = PIL.Image.open(img)
+    # VISUALS
+    if full_img:
+        st.image(full_img, caption="1. Global Context (Meteosat Full Disk)", use_column_width=True)
+    
+    st.write("---")
+    
+    if zoom_img:
+        st.image(zoom_img, caption="2. Target Sector Analysis (Jeddah)", use_column_width=True)
 
-                    # SUPERPROMPT
-                    prompt = f"""
-                    You are the Mission Control AI for the Saudi Cloud Seeding Initiative.
-                    Analyze the following Satellite Telemetry and Thermal Image.
+    st.divider()
+    
+    # TELEMETRY TABLE
+    st.subheader("Microphysical Telemetry")
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("Cloud Probability", f"{prob:.1f}%", "AI Confidence")
+    c2.metric("Cloud Top Pressure", f"{pressure:.0f} hPa", "Altitude Proxy")
+    c3.metric("Droplet Radius", f"{radius:.1f} µm", "Stalled Growth")
+    c4.metric("Optical Depth", f"{opt_depth:.1f}", "Water Volume")
+    c5.metric("Humidity", f"{humidity}%", "Atmospheric Water")
 
-                    --- TELEMETRY DATA ---
-                    Location: {st.session_state['target_city']}
-                    Cloud Phase: {data['phase']} (Must be Liquid/Mixed)
-                    Effective Radius: {data['radius']} microns (Target < 14 microns = Seedable)
-                    Optical Thickness: {data['optical_depth']}
-                    
-                    --- INSTRUCTIONS ---
-                    1. Analyze the Image: Do you see bright white convective structures?
-                    2. Analyze the Physics: Is the cloud liquid and are droplets small ("stuck")?
-                    3. DECISION: If Phase is LIQUID/MIXED and Radius < 14, output "ACTIVATE IONIZERS". Otherwise "STANDBY".
-                    4. Provide brief scientific reasoning.
-                    """
-                    
-                    with st.spinner("Gemini is analyzing atmospheric microphysics..."):
-                        response = model.generate_content([prompt, img_pil])
-                        
-                        st.markdown("### 🛰️ Mission Report")
-                        st.markdown(response.text)
-                        
-                        if "ACTIVATE" in response.text:
-                            st.markdown("<div class='success-box'>✅ SYSTEM ALERT: IONIZATION EMITTERS ACTIVE</div>", unsafe_allow_html=True)
-                            st.balloons()
-                        else:
-                            st.warning("SYSTEM STANDBY: Conditions not met.")
-                            
-                except Exception as e:
-                    st.error(f"AI Connection Error: {e}")
-    else:
-        st.warning("Waiting for Satellite Data acquisition...")
+# --- TAB 3: GEMINI FUSION ---
+with tab3:
+    st.header("Gemini Fusion Engine")
+    
+    # 1. MASTER TABLE
+    st.markdown("### 🔬 Physics-Informed Logic (The Master Table)")
+    table_data = {
+        "Parameter": ["Cloud Probability", "Cloud Top Pressure", "Droplet Radius", "Optical Depth", "Humidity"],
+        "Ideal Range": ["> 70%", "< 700 hPa", "< 14 µm", "> 10", "> 50%"],
+        "Current Value": [f"{prob:.1f}%", f"{pressure:.0f} hPa", f"{radius:.1f} µm", f"{opt_depth:.1f}", f"{humidity}%"]
+    }
+    st.table(pd.DataFrame(table_data))
 
-# --- TAB 4: ADMIN LOGS ---
-with tab_admin:
-    st.header("🗄️ BigQuery Transaction Logs")
-    st.markdown("Real-time logging of all scan events for climate auditing.")
-    if 'log_df' in st.session_state:
-        st.dataframe(st.session_state['log_df'], use_container_width=True)
-    else:
-        st.text("No logs yet.")
+    # 2. VISUAL EVIDENCE
+    if zoom_img:
+        st.caption("Visual Evidence Sent to Vertex AI:")
+        st.image(zoom_img, width=500)
+
+    st.divider()
+
+    if st.button("RUN STRATEGIC ANALYSIS", type="primary"):
+        if not api_key:
+            st.error("🔑 Google API Key Missing!")
+        elif not zoom_img:
+            st.error("⚠️ No Data.")
+        else:
+            genai.configure(api_key=api_key)
+            try:
+                model = genai.GenerativeModel('gemini-2.5-flash')
+                
+                # --- THE SUPER PROMPT ---
+                prompt = f"""
+                ACT AS A LEAD METEOROLOGIST. Analyze this EUMETSAT Satellite Data.
+                
+                --- MISSION CONTEXT ---
+                Location: Jeddah Sector (Meteosat-9)
+                Objective: Hygroscopic Cloud Seeding.
+                
+                --- INPUT DATA ---
+                1. AI Cloud Probability: {prob:.1f}% (0-100 scale)
+                2. Cloud Top Pressure: {pressure:.0f} hPa
+                3. Droplet Effective Radius: {radius:.1f} microns
+                4. Optical Depth (Thickness): {opt_depth:.1f}
+                5. Surface Humidity: {humidity}%
+                
+                --- VISUALS (Attached) ---
+                The image contains two plots:
+                - Left: Cloud Top Pressure (Darker/Grey = Lower/Warmer Clouds).
+                - Right: AI Probability Mask (Blue = High Probability).
+                
+                --- LOGIC ---
+                1. IF Probability > 60% AND Pressure < 800hPa -> "GO" (Cloud is substantial).
+                2. IF Droplet Radius < 14 microns -> "GO" (Cloud is stuck, needs seeding).
+                3. IF Droplet Radius > 14 microns -> "NO-GO" (Already raining).
+                4. IF Optical Depth < 5 -> "NO-GO" (Cloud too thin).
+                5. IF Humidity < 30% -> "NO-GO" (Too dry).
+                
+                --- OUTPUT ---
+                1. **Analysis:** Describe the cloud density seen in the zoomed sector plots and the microphysics.
+                2. **Decision:** **GO** or **NO-GO**?
+                3. **Reasoning:** Scientific justification based on the 5 metrics.
+                """
+                
+                with st.spinner("Vertex AI is calculating microphysics..."):
+                    res = model.generate_content([prompt, zoom_img])
+                    
+                    # --- FIXED LOGIC HERE ---
+                    text_response = res.text.upper()
+                    
+                    if "NO-GO" in text_response:
+                        decision = "NO-GO"
+                    elif "GO" in text_response:
+                        decision = "GO"
+                    else:
+                        decision = "NO-GO" # Fallback
+                    # ------------------------
+                    
+                    # Logging
+                    log_str = f"P:{prob:.0f}% R:{radius:.1f}um OD:{opt_depth:.1f} H:{humidity}%"
+                    log_mission(f"{lat},{lon}", log_str, decision, "AI Authorized")
+                    
+                    st.markdown("### 🛰️ Mission Command Report")
+                    st.write(res.text)
+                    
+                    if decision == "GO":
+                        st.balloons()
+                        st.markdown("<div class='success-box'>✅ MISSION APPROVED</div>", unsafe_allow_html=True)
+                    else:
+                        st.error("⛔ MISSION ABORTED")
+
+            except Exception as e:
+                st.error(f"AI Error: {e}")
