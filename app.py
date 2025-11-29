@@ -207,21 +207,21 @@ def plot_scientific_matrix(data_points):
     
     seed = int(data_points['prob'] * 100)
     
-    plots = [
+    #plots = [
         # ROW 1: SATELLITE / OPTICAL
-        {"ax": axes[0,0], "title": "Cloud Probability (%)", "cmap": "Blues", "data": generate_cloud_texture(seed=seed, roughness=6) * data_points['prob'], "vmax": 100},
-        {"ax": axes[0,1], "title": "Cloud Top Pressure (hPa)", "cmap": "gray_r", "data": generate_cloud_texture(seed=seed+1, roughness=8) * data_points['press'], "vmax": 1000},
-        {"ax": axes[0,2], "title": "Effective Radius (µm)", "cmap": "viridis", "data": generate_cloud_texture(seed=seed+2, roughness=4) * data_points['rad'], "vmax": 30},
-        {"ax": axes[0,3], "title": "Optical Depth", "cmap": "magma", "data": generate_cloud_texture(seed=seed+3, roughness=5) * data_points['opt'], "vmax": 50},
-        {"ax": axes[0,4], "title": "Phase (0=Clr,1=Liq,2=Ice)", "cmap": "cool", "data": generate_cloud_texture(seed=seed+4, roughness=10) * data_points['phase'], "vmax": 2},
+     #   {"ax": axes[0,0], "title": "Cloud Probability (%)", "cmap": "Blues", "data": generate_cloud_texture(seed=seed, roughness=6) * data_points['prob'], "vmax": 100},
+     #   {"ax": axes[0,1], "title": "Cloud Top Pressure (hPa)", "cmap": "gray_r", "data": generate_cloud_texture(seed=seed+1, roughness=8) * data_points['press'], "vmax": 1000},
+     #   {"ax": axes[0,2], "title": "Effective Radius (µm)", "cmap": "viridis", "data": generate_cloud_texture(seed=seed+2, roughness=4) * data_points['rad'], "vmax": 30},
+     #   {"ax": axes[0,3], "title": "Optical Depth", "cmap": "magma", "data": generate_cloud_texture(seed=seed+3, roughness=5) * data_points['opt'], "vmax": 50},
+     #   {"ax": axes[0,4], "title": "Phase (0=Clr,1=Liq,2=Ice)", "cmap": "cool", "data": generate_cloud_texture(seed=seed+4, roughness=10) * data_points['phase'], "vmax": 2},
         
         # ROW 2: ERA5 / INTERNAL PHYSICS
-        {"ax": axes[1,0], "title": "Liquid Water (kg/m³)", "cmap": "Blues", "data": generate_cloud_texture(seed=seed+5, roughness=7) * data_points['lwc'], "vmax": 0.01},
-        {"ax": axes[1,1], "title": "Ice Water Content", "cmap": "PuBu", "data": generate_cloud_texture(seed=seed+6, roughness=7) * (data_points['lwc']/3), "vmax": 0.01},
-        {"ax": axes[1,2], "title": "Rel. Humidity (%)", "cmap": "Greens", "data": generate_cloud_texture(seed=seed+7, roughness=10) * data_points['rh'], "vmax": 100},
-        {"ax": axes[1,3], "title": "Vertical Velocity (m/s)", "cmap": "RdBu_r", "data": (generate_cloud_texture(seed=seed+8, roughness=3) - 0.5) * 10, "vmax": 5},
-        {"ax": axes[1,4], "title": "Temperature (°C)", "cmap": "inferno", "data": generate_cloud_texture(seed=seed+9, roughness=15) * 10 + data_points['temp'], "vmax": 40},
-    ]
+     #   {"ax": axes[1,0], "title": "Liquid Water (kg/m³)", "cmap": "Blues", "data": generate_cloud_texture(seed=seed+5, roughness=7) * data_points['lwc'], "vmax": 0.01},
+     #   {"ax": axes[1,1], "title": "Ice Water Content", "cmap": "PuBu", "data": generate_cloud_texture(seed=seed+6, roughness=7) * (data_points['lwc']/3), "vmax": 0.01},
+     #   {"ax": axes[1,2], "title": "Rel. Humidity (%)", "cmap": "Greens", "data": generate_cloud_texture(seed=seed+7, roughness=10) * data_points['rh'], "vmax": 100},
+     #   {"ax": axes[1,3], "title": "Vertical Velocity (m/s)", "cmap": "RdBu_r", "data": (generate_cloud_texture(seed=seed+8, roughness=3) - 0.5) * 10, "vmax": 5},
+     #   {"ax": axes[1,4], "title": "Temperature (°C)", "cmap": "inferno", "data": generate_cloud_texture(seed=seed+9, roughness=15) * 10 + data_points['temp'], "vmax": 40},
+    #]
 
     for p in plots:
         ax = p['ax']
