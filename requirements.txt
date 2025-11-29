@@ -13,3 +13,4 @@ h5netcdf
 cfgrib
 firebase-admin
 scipy
+earthengine-api
