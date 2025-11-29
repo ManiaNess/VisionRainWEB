@@ -33,8 +33,22 @@ st.markdown("""
     h1 {color: #00e5ff; font-family: 'Helvetica Neue', sans-serif;}
     h2, h3 {color: #e0e0e0;}
     .stMetric {background-color: #1a1a1a; border: 1px solid #333; border-radius: 8px; padding: 10px;}
-    .analysis-text {font-family: 'Courier New', monospace; color: #00ff80; background-color: #111; padding: 15px; border-left: 3px solid #00ff80; border-radius: 5px; margin-top: 10px;}
-    .analysis-fail {color: #ff4444; border-left: 3px solid #ff4444;}
+    .stMetric label {color: #888;}
+    .pitch-box {background: linear-gradient(145deg, #1e1e1e, #252525); padding: 25px; border-radius: 15px; border-left: 6px solid #00e5ff; margin-bottom: 20px;}
+    .analysis-text {
+        font-family: 'Courier New', monospace;
+        color: #00ff80;
+        background-color: #111;
+        padding: 15px;
+        border-left: 3px solid #00ff80;
+        border-radius: 5px;
+        margin-top: 10px;
+    }
+    .analysis-fail {
+        color: #ff4444;
+        border-left: 3px solid #ff4444;
+    }
+    iframe {border-radius: 10px; border: 1px solid #444;}
     </style>
     """, unsafe_allow_html=True)
 
@@ -78,15 +92,30 @@ def save_mission_log(region, stats, decision, reasoning):
     bq_client.insert_rows("visionrain_logs", "mission_audit", [entry])
 def get_mission_logs(): return pd.DataFrame(st.session_state.firestore_db)
 
-# --- SCIENTIFIC ENGINE (SIMULATION) ---
-def generate_cloud_texture(shape=(100, 100), seed=42, intensity=1.0, roughness=10.0):
-    """Generates a soft, realistic cloud gradient using Gaussian smoothing."""
+# --- SCIENTIFIC DATA ENGINE (PIXELATED SIMULATION) ---
+
+def generate_pixel_grid(shape=(100, 100), seed=42, intensity=1.0):
+    """
+    Generates a realistic 'Digital Sensor' look.
+    It creates a coherent cloud shape, but then pixelates it into 10x10 blocks
+    so it looks like raw satellite grid data, not soft blobs.
+    """
     np.random.seed(seed)
+    
+    # 1. Generate Base Coherent Noise (The Physics)
     noise = np.random.rand(*shape)
-    # High roughness = smoother, less "blobby"
-    smooth = gaussian_filter(noise, sigma=roughness)
+    smooth = gaussian_filter(noise, sigma=15.0) # Very smooth base
     smooth = (smooth - smooth.min()) / (smooth.max() - smooth.min())
-    return smooth * intensity
+    
+    # 2. Pixelate It (The Sensor View)
+    # Downsample to 10x10 grid
+    block_size = 10
+    small_view = smooth[::block_size, ::block_size]
+    
+    # Upsample back to 100x100 with Nearest Neighbor (Hard edges)
+    pixelated = small_view.repeat(block_size, axis=0).repeat(block_size, axis=1)
+    
+    return pixelated * intensity
 
 def get_simulated_data(sector_name):
     profile = SAUDI_SECTORS[sector_name]
@@ -117,52 +146,38 @@ def run_kingdom_wide_scan():
         results[sector] = get_simulated_data(sector)
     return results
 
-# --- THE REALISTIC VISUALIZER ---
+# --- VISUALIZATION ENGINE (GRID SQUARES) ---
 def plot_scientific_matrix(data_points):
     """
-    Generates the matrix using a UNIFIED CLOUD MASK so all plots match.
-    Uses 'bicubic' interpolation for photorealistic smoothness.
+    Generates the Matrix with HARD PIXEL EDGES and TEXT OVERLAYS.
     """
     fig, axes = plt.subplots(2, 5, figsize=(20, 7))
     fig.patch.set_facecolor('#0e1117')
     
-    # 1. Create MASTER SHAPE (The "Cloud")
+    # Unified Seed
     seed = int(data_points['prob'] * 100)
-    master_mask = generate_cloud_texture(seed=seed, roughness=8.0) 
+    master_grid = generate_pixel_grid(seed=seed) 
     
-    # 2. Derive other metrics from the master mask
-    # This ensures if there is a cloud in the top-left of 'Probability', 
-    # there is also a 'Temperature' drop in the top-left.
-    
-    vis_prob = master_mask * data_points['prob']
-    vis_press = (1.0 - master_mask) * 1000 # Higher cloud = Lower pressure
-    
-    # Radius only exists where cloud exists
-    vis_rad = master_mask * data_points['rad']
-    
-    # Phase is uniform for the cloud blob
-    vis_phase = master_mask * data_points['phase']
-    
-    # LWC / Ice
-    vis_lwc = master_mask * data_points['lwc']
-    vis_ice = master_mask * (data_points['lwc'] * 0.1)
-    
-    # Temp (Clouds are colder)
-    vis_temp = (1.0 - master_mask) * 30.0 + (master_mask * data_points['temp'])
+    # Apply Master Grid to Metrics
+    vis_prob = master_grid * data_points['prob']
+    vis_press = (1.0 - master_grid) * 1000 
+    vis_rad = master_grid * data_points['rad']
+    vis_phase = master_grid * data_points['phase']
+    vis_lwc = master_grid * data_points['lwc']
+    vis_ice = master_grid * (data_points['lwc'] * 0.1)
+    vis_temp = (1.0 - master_grid) * 30.0 + (master_grid * data_points['temp'])
 
     plots = [
-        # ROW 1
         {"ax": axes[0,0], "title": "Cloud Probability (%)", "cmap": "Blues", "data": vis_prob, "vmax": 100},
         {"ax": axes[0,1], "title": "Cloud Top Pressure (hPa)", "cmap": "gray_r", "data": vis_press, "vmax": 1000},
         {"ax": axes[0,2], "title": "Effective Radius (µm)", "cmap": "viridis", "data": vis_rad, "vmax": 30},
-        {"ax": axes[0,3], "title": "Optical Depth", "cmap": "magma", "data": master_mask * data_points['opt'], "vmax": 50},
+        {"ax": axes[0,3], "title": "Optical Depth", "cmap": "magma", "data": master_grid * data_points['opt'], "vmax": 50},
         {"ax": axes[0,4], "title": "Cloud Phase", "cmap": "cool", "data": vis_phase, "vmax": 2},
         
-        # ROW 2
         {"ax": axes[1,0], "title": "Liquid Water (kg/m³)", "cmap": "Blues", "data": vis_lwc, "vmax": 0.01},
         {"ax": axes[1,1], "title": "Ice Water Content", "cmap": "PuBu", "data": vis_ice, "vmax": 0.01},
-        {"ax": axes[1,2], "title": "Rel. Humidity (%)", "cmap": "Greens", "data": master_mask * data_points['rh'], "vmax": 100},
-        {"ax": axes[1,3], "title": "Vertical Velocity (m/s)", "cmap": "RdBu_r", "data": (master_mask - 0.5) * 5},
+        {"ax": axes[1,2], "title": "Rel. Humidity (%)", "cmap": "Greens", "data": master_grid * data_points['rh'], "vmax": 100},
+        {"ax": axes[1,3], "title": "Vertical Velocity (m/s)", "cmap": "RdBu_r", "data": (master_grid - 0.5) * 5},
         {"ax": axes[1,4], "title": "Temperature (°C)", "cmap": "inferno", "data": vis_temp, "vmax": 40},
     ]
 
@@ -170,22 +185,29 @@ def plot_scientific_matrix(data_points):
         ax = p['ax']
         ax.set_facecolor('#0e1117')
         
-        # KEY CHANGE: 'bicubic' interpolation removes the blocks/blobs
-        im = ax.imshow(p['data'], cmap=p['cmap'], aspect='auto', interpolation='bicubic')
+        # KEY CHANGE: 'nearest' interpolation creates hard square pixels
+        im = ax.imshow(p['data'], cmap=p['cmap'], aspect='auto', interpolation='nearest')
         
         ax.set_title(p['title'], color="white", fontsize=9, fontweight='bold')
         ax.axis('off')
         
-        # SPECIAL HANDLING FOR PHASE TEXT
+        # --- EXPLICIT PHASE TEXT ---
         if "Phase" in p['title']:
             phase_val = data_points['phase']
-            phase_txt = "LIQUID" if phase_val == 1 else "ICE" if phase_val == 2 else "CLEAR"
-            color = "cyan" if phase_val == 1 else "white"
-            # Overlay Text
-            ax.text(0.5, 0.5, phase_txt, 
-                    color=color, ha="center", va="center", transform=ax.transAxes,
-                    fontsize=16, fontweight='bold',
-                    bbox=dict(facecolor='black', alpha=0.6, edgecolor='none'))
+            if phase_val == 1:
+                txt = "LIQUID"
+                col = "cyan"
+            elif phase_val == 2:
+                txt = "ICE"
+                col = "white"
+            else:
+                txt = "CLEAR"
+                col = "gray"
+            
+            # Draw heavy text in center
+            ax.text(50, 50, txt, color=col, ha="center", va="center", 
+                   fontsize=20, fontweight='heavy',
+                   bbox=dict(facecolor='black', alpha=0.7, edgecolor=col, boxstyle='round,pad=0.5'))
         else:
             plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
 
@@ -203,7 +225,7 @@ if 'all_sector_data' not in st.session_state:
 with st.sidebar:
     st.image("https://cdn-icons-png.flaticon.com/512/414/414927.png", width=80)
     st.title("VisionRain")
-    st.caption("Kingdom Commander | v32.0 (Stable)")
+    st.caption("Kingdom Commander | v35.0 (Grid)")
     
     st.markdown("### ☁️ Infrastructure")
     st.markdown('<div class="cloud-badge"><span class="status-ok">●</span> Cloud Run</div>', unsafe_allow_html=True)
@@ -211,14 +233,8 @@ with st.sidebar:
     st.markdown('<div class="cloud-badge"><span class="status-ok">●</span> Cloud Storage</div>', unsafe_allow_html=True)
 
     st.write("---")
-    
-    # NATIVE STREAMLIT STATE BINDING (Fixes Refresh Loop)
     region_options = list(SAUDI_SECTORS.keys())
-    selected_region = st.selectbox(
-        "Active Sector", 
-        region_options, 
-        key="selected_region_key" # Keeps state between reloads
-    )
+    selected_region = st.selectbox("Active Sector", region_options, key="selected_region_key")
 
     if st.button("🔄 FORCE RESCAN"):
         st.session_state.all_sector_data = run_kingdom_wide_scan()
@@ -246,7 +262,6 @@ with tab1:
 
 # TAB 2: OPS
 with tab2:
-    # Use selected_region from the widget key directly or session state
     current_region = st.session_state.get("selected_region_key", region_options[0])
     current_data = st.session_state.all_sector_data[current_region]
     
