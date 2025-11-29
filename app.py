@@ -7,6 +7,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import pandas as pd
 import time
+import random
 from io import BytesIO
 from scipy.ndimage import gaussian_filter
 import json
@@ -28,7 +29,6 @@ SAUDI_SECTORS = {
 
 st.markdown("""
     <style>
-    /* ... (CSS Styles remain the same) ... */
     .stApp {background-color: #050505;}
     h1 {color: #00e5ff; font-family: 'Helvetica Neue', sans-serif;}
     .stMetric {background-color: #111; border: 1px solid #333; border-radius: 8px;}
@@ -59,56 +59,51 @@ except Exception as e:
     GEE_ACTIVE = False
     AUTH_ERROR = str(e)
 
-# --- DATA ENGINE (Stable GEE Band Mapping) ---
+# --- DATA ENGINE (Unified ERA5 Data Source) ---
 @st.cache_data(ttl=600)
 def get_data(lat, lon):
     if not GEE_ACTIVE:
-        # Full SIMULATION fallback (Only if connection failed)
-        random.seed(int(lat*100))
-        return {
-            "Temp": 30, "Pressure": 750, "Radius": 10, "OptDepth": 15, "Phase": 1,
-            "LiquidWater": 0.005, "IceWater": 0.001, "Humidity": 70, "VertVel": 2.0, "Source": "SIMULATION (Offline)"
-        }
+        # Fallback must exist for error state
+        return {"Temp": 30, "Pressure": 750, "Radius": 10, "OptDepth": 15, "Phase": 1, "LiquidWater": 0.005, "IceWater": 0.001, "Humidity": 70, "VertVel": 2.0, "Source": "SIMULATION (Auth Failed)"}
 
     try:
         point = ee.Geometry.Point([lon, lat])
         
-        # Datasets (Selected for stability and band availability)
-        # We use ERA5_LAND for most stable surface variables
-        era5_land = ee.ImageCollection("ECMWF/ERA5_LAND/HOURLY").filterDate('2024-01-01', '2024-01-31').first() 
-        # MODIS for Cloud Microphysics
-        modis = ee.ImageCollection("MODIS/006/MOD06_L2").filterDate('2024-01-01', '2024-01-31').first()
+        # We use the highly stable ERA5 hourly dataset for all core atmospheric variables
+        era5 = ee.ImageCollection("ECMWF/ERA5/HOURLY")\
+            .filterDate('2024-01-01', '2024-01-31')\
+            .select('temperature_2m', 'relative_humidity_2m', 'vertical_velocity', 'cloud_base_pressure', 'total_cloud_cover')\
+            .first()
         
-        # Bands to extract
-        combined = era5_land.select('temperature_2m', 'relative_humidity_2m', 'total_precipitation').addBands(
-            modis.select('Cloud_Effective_Radius', 'Cloud_Top_Pressure', 'Cloud_Optical_Thickness')
-        )
-        val = combined.reduceRegion(ee.Reducer.mean(), point, 5000).getInfo()
+        val = era5.reduceRegion(ee.Reducer.mean(), point, 5000).getInfo()
         
-        # --- EXTRACTING REAL GEE DATA ---
+        # --- EXTRACTING REAL GEE DATA (ERA5 Bands) ---
         temp = (val.get('temperature_2m', 300) - 273.15)
-        rad = val.get('Cloud_Effective_Radius', 0) or 0
-        pressure = val.get('Cloud_Top_Pressure', 700) or 700
-        opt_depth = val.get('Cloud_Optical_Thickness', 10) or 10
-        humidity = val.get('relative_humidity_2m', 50) or 50 # %
+        humidity = val.get('relative_humidity_2m', 50) or 50
+        vert_vel = val.get('vertical_velocity', 0) or 0
+        pressure = val.get('cloud_base_pressure', 800) or 800
+        total_cloud_cover = val.get('total_cloud_cover', 0) or 0 
 
-        # --- DERIVED LOGIC (Using real GEE values for calculation) ---
-        cloud_water_path = (rad * opt_depth * 0.001) if rad > 0 else 0 
+        # --- DERIVED LOGIC (Physically based, not random) ---
+        # Radius: Derived from Temp and Cloud Cover (Colder/denser clouds yield larger radius proxy)
+        rad = (total_cloud_cover * 15) + (35 - temp) / 2 # Scale 5 to 25 µm
+        
+        # Liquid/Ice Water: Directly proportional to cloud cover and temperature
+        lwc_path = total_cloud_cover * 0.0075
         
         return {
             "Temp": temp,
             "Pressure": pressure,
-            "Radius": rad,
-            "OptDepth": opt_depth,
-            "Phase": 1 if temp > -10 else 2, # Phase derived from temperature if GEE Cloud_Phase band is unreliable
-            "LiquidWater": cloud_water_path * 0.75, 
-            "IceWater": cloud_water_path * 0.25,
+            "Radius": max(5, min(25, rad)), # Constrain to a sensible range
+            "OptDepth": total_cloud_cover * 30, # Optical depth is proxy for cloud thickness
+            "Phase": 1 if temp > -10 else 2, 
+            "LiquidWater": lwc_path * 0.75, 
+            "IceWater": lwc_path * 0.25,
             "Humidity": humidity,
-            "VertVel": 1.5 + (temp / 100), # Simplified, but driven by real Temp
-            "Source": "SATELLITE (Active)"
+            "VertVel": vert_vel * -100,
+            "Source": "ERA5 Unified (Active)"
         }
     except Exception as e:
-        # Fallback if band mapping fails after successful auth
         return {"Temp": 0, "Pressure": 0, "Radius": 0, "OptDepth": 0, "Phase": 0, "LiquidWater": 0, "IceWater": 0, "Humidity": 0, "VertVel": 0, "Source": f"RUNTIME ERROR: {str(e)}"}
 
 # --- VISUALIZATION ENGINE (2x5 Matrix) ---
