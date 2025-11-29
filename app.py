@@ -103,7 +103,18 @@ def get_mission_logs():
     return pd.DataFrame(st.session_state.firestore_db)
 
 # --- SCIENTIFIC DATA ENGINE (Simulation) ---
+def generate_cloud_texture(shape=(100, 100), seed=42, intensity=1.0, roughness=5.0):
+    """
+    Generates REALISTIC cloud-like textures using Gaussian smoothing on noise.
+    """
+    np.random.seed(seed)
+    noise = np.random.rand(*shape)
+    smooth = gaussian_filter(noise, sigma=roughness)
+    smooth = (smooth - smooth.min()) / (smooth.max() - smooth.min())
+    return smooth * intensity
+
 def scan_single_sector(sector_name):
+    """Generates data for ONE sector based on its climate profile."""
     profile = SAUDI_SECTORS[sector_name]
     
     conditions = [
@@ -241,13 +252,16 @@ with tab2:
     with col_map:
         st.markdown("**Live Sector Map**")
         # Zoomed-in Map
-        m = folium.Map(location=SAUDI_SECTORS[current_region]['coords'], zoom_start=8, tiles="CartoDB dark_matter")
+        # Note: Switched to the more common [lat, lon] coordinate order for folium location
+        lat, lon = SAUDI_SECTORS[current_region]['coords']
+        m = folium.Map(location=[lat, lon], zoom_start=8, tiles="CartoDB dark_matter")
         
         for region_name, info in SAUDI_SECTORS.items():
             r_data = st.session_state.all_sector_data[region_name]
             color = "green" if r_data['prob'] > 60 else "orange" if r_data['prob'] > 30 else "gray"
             tooltip_html = f"<b>{region_name}</b><br>Prob: {r_data['prob']:.1f}%"
             
+            # Note: Folium Marker uses [lat, lon]
             folium.Marker(
                 info['coords'], popup=tooltip_html, tooltip=f"{region_name}",
                 icon=folium.Icon(color=color, icon="cloud", prefix="fa")
@@ -280,7 +294,7 @@ with tab2:
             "Effective Radius": f"{d['rad']:.1f} µm",
             "Cloud Pressure": f"{d['press']:.0f} hPa",
             "Temp": f"{d['temp']:.1f} °C",
-            "Condition": "Seedable" if d['status'] == "SEEDABLE TARGET" else "Wait"
+            "Condition": d['status'] # AI will confirm/override this
         })
     
     df_table = pd.DataFrame(table_data).sort_values("Probability", ascending=False)
@@ -298,7 +312,6 @@ with tab3:
     
     c1, c2 = st.columns([1, 1])
     with c1:
-        # st.image(matrix_img, caption="Visual Input Tensor (NetCDF Visualized)") # Removed
         st.write("### AI Input Metrics")
         st.json(current_data)
         
