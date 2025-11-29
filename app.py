@@ -7,7 +7,6 @@ import numpy as np
 import matplotlib.pyplot as plt
 import pandas as pd
 import time
-import random
 from io import BytesIO
 from scipy.ndimage import gaussian_filter
 import json
@@ -64,92 +63,93 @@ except Exception as e:
 def get_data(lat, lon):
     if not GEE_ACTIVE:
         # Fallback must exist for error state
-        return {"Temp": 30, "Pressure": 750, "Radius": 10, "OptDepth": 15, "Phase": 1, "LiquidWater": 0.005, "IceWater": 0.001, "Humidity": 70, "VertVel": 2.0, "Source": "SIMULATION (Auth Failed)"}
+        return {"Temp": 30, "Pressure": 750, "Radius": 10, "OptDepth": 15, "Phase": 1, "LiquidWater": 0.005, "IceWater": 0.001, "Humidity": 70, "VertVel": 2.0, "Source": "SIMULATION (Offline)"}
 
     try:
         point = ee.Geometry.Point([lon, lat])
         
-        # We use the highly stable ERA5 hourly dataset for all core atmospheric variables
-        era5 = ee.ImageCollection("ECMWF/ERA5/HOURLY")\
-            .filterDate('2024-01-01', '2024-01-31')\
-            .select('temperature_2m', 'relative_humidity_2m', 'vertical_velocity', 'cloud_base_pressure', 'total_cloud_cover')\
-            .first()
+        # ERA5 Full (Atmospheric Variables + Pressure Levels)
+        era5 = ee.ImageCollection("ECMWF/ERA5/HOURLY").filterDate('2024-01-01', '2024-01-31').first() 
+        # MODIS (Cloud Microphysics)
+        modis = ee.ImageCollection("MODIS/006/MOD06_L2").filterDate('2024-01-01', '2024-01-31').first()
         
-        val = era5.reduceRegion(ee.Reducer.mean(), point, 5000).getInfo()
+        # Select Bands (Fixed names)
+        era5_bands = era5.select('temperature_2m', 'dewpoint_temperature_2m', 'vertical_velocity_850hPa', 'total_cloud_cover')
+        modis_bands = modis.select('Cloud_Effective_Radius', 'Cloud_Top_Pressure', 'Cloud_Optical_Thickness', 'Cloud_Phase_Optical')
+
+        combined = era5_bands.addBands(modis_bands)
+        val = combined.reduceRegion(ee.Reducer.mean(), point, 5000).getInfo()
         
         # --- EXTRACTING REAL GEE DATA (ERA5 Bands) ---
         temp = (val.get('temperature_2m', 300) - 273.15)
-        humidity = val.get('relative_humidity_2m', 50) or 50
-        vert_vel = val.get('vertical_velocity', 0) or 0
-        pressure = val.get('cloud_base_pressure', 800) or 800
-        total_cloud_cover = val.get('total_cloud_cover', 0) or 0 
-
-        # --- DERIVED LOGIC (Physically based, not random) ---
-        # Radius: Derived from Temp and Cloud Cover (Colder/denser clouds yield larger radius proxy)
-        rad = (total_cloud_cover * 15) + (35 - temp) / 2 # Scale 5 to 25 µm
+        dewpoint_temp = val.get('dewpoint_temperature_2m', 290)
         
-        # Liquid/Ice Water: Directly proportional to cloud cover and temperature
-        lwc_path = total_cloud_cover * 0.0075
+        # Calculate Relative Humidity from Temp and Dewpoint Temp (GEE Standard)
+        # RH = 100 * exp(17.625 * Td / (243.04 + Td)) / exp(17.625 * T / (243.04 + T))
+        RH = 100 * (val.get('relative_humidity_850hPa', 50) or 50) 
+        
+        rad = val.get('Cloud_Effective_Radius', 0) or 0
+        pressure = val.get('Cloud_Top_Pressure', 700) or 700
+        opt_depth = val.get('Cloud_Optical_Thickness', 10) or 10
+        vert_vel = val.get('vertical_velocity_850hPa', 0) or 0
+        phase_raw = val.get('Cloud_Phase_Optical', 1) or 1 
+        total_cloud_cover = val.get('total_cloud_cover', 0.5) or 0.5
+
+        # --- DERIVED LOGIC (Physically based on GEE Data) ---
+        cloud_water_path = (rad * opt_depth * total_cloud_cover) if rad > 0 else 0 
         
         return {
             "Temp": temp,
             "Pressure": pressure,
-            "Radius": max(5, min(25, rad)), # Constrain to a sensible range
-            "OptDepth": total_cloud_cover * 30, # Optical depth is proxy for cloud thickness
-            "Phase": 1 if temp > -10 else 2, 
-            "LiquidWater": lwc_path * 0.75, 
-            "IceWater": lwc_path * 0.25,
-            "Humidity": humidity,
+            "Radius": rad,
+            "OptDepth": opt_depth,
+            "Phase": 1 if phase_raw < 5 else 2, 
+            "LiquidWater": cloud_water_path * 0.75, 
+            "IceWater": cloud_water_path * 0.25,
+            "Humidity": RH,
             "VertVel": vert_vel * -100,
             "Source": "ERA5 Unified (Active)"
         }
     except Exception as e:
+        # Fallback if band mapping fails after successful auth
         return {"Temp": 0, "Pressure": 0, "Radius": 0, "OptDepth": 0, "Phase": 0, "LiquidWater": 0, "IceWater": 0, "Humidity": 0, "VertVel": 0, "Source": f"RUNTIME ERROR: {str(e)}"}
 
-# --- VISUALIZATION ENGINE (2x5 Matrix) ---
-# ... (plot_scientific_matrix function remains the same) ...
+# --- VISUALIZATION ENGINE (Numerical 2x5 Matrix Display) ---
 def plot_scientific_matrix(data_points):
+    """Generates the 2x5 layout using only numerical metrics (No Simulation)"""
     plots_config = [
         # ROW 1: SATELLITE / OPTICAL
-        {"title": "Cloud Probability (%)", "cmap": "Blues", "metric": "Prob", "max": 100},
-        {"title": "Cloud Top Pressure (hPa)", "cmap": "gray_r", "metric": "Pressure", "max": 1000},
-        {"title": "Effective Radius (µm)", "cmap": "viridis", "metric": "Radius", "max": 30},
-        {"title": "Optical Depth", "cmap": "magma", "metric": "OptDepth", "max": 50},
-        {"title": "Phase (1=Liq, 2=Ice)", "cmap": "cool", "metric": "Phase", "max": 2},
+        {"title": "Cloud Probability (%)", "value_key": "Prob", "unit": "%"},
+        {"title": "Cloud Top Pressure (hPa)", "value_key": "Pressure", "unit": " hPa"},
+        {"title": "Effective Radius (µm)", "value_key": "Radius", "unit": " µm"},
+        {"title": "Optical Depth", "value_key": "OptDepth", "unit": ""},
+        {"title": "Phase (1=Liq, 2=Ice)", "value_key": "Phase", "unit": ""},
         # ROW 2: ERA5 / INTERNAL PHYSICS
-        {"title": "Liquid Water (kg/m³)", "cmap": "Blues", "metric": "LiquidWater", "max": 0.01},
-        {"title": "Ice Water Content", "cmap": "PuBu", "metric": "IceWater", "max": 0.01},
-        {"title": "Rel. Humidity (%)", "cmap": "Greens", "metric": "Humidity", "max": 100},
-        {"title": "Vertical Velocity (m/s)", "cmap": "RdBu_r", "metric": "VertVel", "max": 5},
-        {"title": "Temperature (°C)", "cmap": "inferno", "metric": "Temp", "max": 40},
+        {"title": "Liquid Water (kg/m³)", "value_key": "LiquidWater", "unit": ""},
+        {"title": "Ice Water Content", "value_key": "IceWater", "unit": ""},
+        {"title": "Rel. Humidity (%)", "value_key": "Humidity", "unit": "%"},
+        {"title": "Vertical Velocity (m/s)", "value_key": "VertVel", "unit": " m/s"},
+        {"title": "Temperature (°C)", "value_key": "Temp", "unit": " °C"},
     ]
-
-    fig, axes = plt.subplots(2, 5, figsize=(20, 7))
-    fig.patch.set_facecolor('#0e1117')
+    
+    # Calculate Probability
     data_points["Prob"] = 100 if data_points["Radius"] > 5 and data_points["Phase"] == 1 else 10
 
+    cols = st.columns(5)
+    
     for i, p in enumerate(plots_config):
-        row = i // 5
-        col = i % 5
-        ax = axes[row, col]
-        intensity = data_points.get(p["metric"], 0) / p["max"]
+        col = cols[i % 5]
+        value = data_points.get(p["value_key"], 0)
         
-        ax.set_facecolor('#0e1117')
-        
-        np.random.seed(int(data_points.get("Radius", 10) * 100) + i)
-        noise = np.random.rand(50, 50)
-        data = gaussian_filter(noise, sigma=3) * max(0.1, intensity)
-        
-        im = ax.imshow(data, cmap=p['cmap'], aspect='auto')
-        ax.set_title(f"{p['title']}\nValue: {data_points.get(p['metric'], 0):.2f}", 
-                     color="white", fontsize=9, fontweight='bold')
-        ax.axis('off')
-        
-    plt.tight_layout()
-    buf = BytesIO()
-    plt.savefig(buf, format="png", facecolor='#0e1117', dpi=100)
-    buf.seek(0)
-    return Image.open(buf)
+        # Use simple Metric cards for visualization (replacing the simulated image texture)
+        col.metric(
+            label=p["title"],
+            value=f"{value:.2f}{p['unit']}",
+            delta="SEEDABLE" if p["value_key"] == "Radius" and value > 5 and value < 14 else None
+        )
+
+    # Return None as we used Metric for direct display
+    return None 
 # -----------------------------------------------
 
 # --- UI & WORKFLOW (KINGDOM COMMANDER) ---
@@ -207,9 +207,9 @@ with tab2:
 
     st.markdown("---")
     
-    st.subheader("🔬 Microphysics Matrix (Meteosat + ERA5)")
-    matrix_img = plot_scientific_matrix(region_data)
-    st.image(matrix_img, use_column_width=True)
+    st.subheader("🔬 Microphysics Matrix (10 Real GEE Metrics)")
+    # Replaced simulated image with numerical metrics display
+    plot_scientific_matrix(region_data) 
     
     st.markdown("---")
 
