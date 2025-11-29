@@ -14,3 +14,4 @@ cfgrib
 firebase-admin
 scipy
 earthengine-api
+geemap
