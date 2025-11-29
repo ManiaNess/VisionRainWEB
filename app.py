@@ -11,8 +11,50 @@ from io import BytesIO
 import folium
 from streamlit_folium import st_folium
 
+# --- SAUDI SECTOR CONFIGURATION (NEW) ---
+# Defines coordinates and "Climate Bias" (higher bias = more likely to find rain)
+SAUDI_SECTORS = {
+    "Jeddah (Red Sea Coast)": {
+        "coords": [21.5433, 39.1728], 
+        "bias_prob": 0,    # Neutral baseline
+        "bias_temp": 0, 
+        "humidity_base": 60
+    },
+    "Riyadh (Central Arid)": {
+        "coords": [24.7136, 46.6753], 
+        "bias_prob": -30,  # Harder to find rain
+        "bias_temp": 5,    # Hotter
+        "humidity_base": 20
+    },
+    "Abha (Asir Mountains)": {
+        "coords": [18.2164, 42.5053], 
+        "bias_prob": 40,   # Very high chance of rain (Monsoon influence)
+        "bias_temp": -10,  # Cooler
+        "humidity_base": 70
+    },
+    "Dammam (Gulf Coast)": {
+        "coords": [26.4207, 50.0888], 
+        "bias_prob": -10, 
+        "bias_temp": 2, 
+        "humidity_base": 65
+    },
+    "Tabuk (Northern Region)": {
+        "coords": [28.3835, 36.5662], 
+        "bias_prob": 10,   # Moderate chance (Winter rains)
+        "bias_temp": -5, 
+        "humidity_base": 35
+    }
+}
+
 # --- FIREBASE / FIRESTORE IMPORTS ---
-from firebase_admin import credentials, firestore, initialize_app, get_app
+# WRAPPED IN TRY/EXCEPT TO PREVENT CRASHES IF LIB IS MISSING
+try:
+    import firebase_admin
+    from firebase_admin import credentials, firestore, initialize_app
+    FIREBASE_AVAILABLE = True
+except ImportError:
+    FIREBASE_AVAILABLE = False
+    
 import json
 
 # --- CONFIGURATION ---
@@ -31,34 +73,37 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# --- FIRESTORE SETUP (Replaces CSV/BigQuery) ---
-# Check if running in a standard environment or specific cloud environment
-key_dict = json.loads(st.secrets["textkey"]) if "textkey" in st.secrets else None
+# --- FIRESTORE SETUP (Safe Fallback Mode) ---
+# If Firebase is missing or no keys, we use a SessionState "Database"
 
 if "firestore_db" not in st.session_state:
-    try:
-        # Try to get existing app or initialize
-        try:
-            app = get_app()
-        except ValueError:
-            # If we had a service account key, we would use it here. 
-            # For this demo, we assume the environment might be authenticated or we use a mock.
-            # However, strictly following instructions for "persistent storage" usually implies
-            # client-side JS SDK in these specific AI environments, but for Python Streamlit,
-            # we typically need a service account. 
-            # FALLBACK: If no credentials, we will use a specialized Session State Mock 
-            # to ensure the app runs flawlessly for the user without crashing on Auth.
-            app = None 
+    st.session_state.firestore_db = []
 
-        # DATA PERSISTENCE STRATEGY
-        # Since we cannot easily inject a service_account.json here for server-side python,
-        # We will build a robust SessionState "Database" that persists during the run.
-        st.session_state.firestore_db = []
+def init_firebase():
+    """Attempts to initialize Firebase, returns DB or None."""
+    if not FIREBASE_AVAILABLE:
+        return None
+    try:
+        # Check if already initialized to prevent 'App already exists' error
+        if not firebase_admin._apps:
+            # Look for secrets in .streamlit/secrets.toml
+            if "firebase" in st.secrets:
+                # specific handling for streamlit secrets dictionary
+                key_dict = dict(st.secrets["firebase"])
+                cred = credentials.Certificate(key_dict)
+                initialize_app(cred)
+            else:
+                return None # Run in offline mode
+        return firestore.client()
     except Exception as e:
-        st.session_state.firestore_db = []
+        return None
+
+# Initialize DB safely
+db = init_firebase()
 
 def save_mission_log(region, stats, decision, reasoning):
-    """Saves mission data to the persistent log."""
+    """Saves mission data to Firestore (if avail) AND Session State (Fallback)."""
+    # 1. Save to Session State (Always works immediately for the UI)
     entry = {
         "timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "region": region,
@@ -67,9 +112,16 @@ def save_mission_log(region, stats, decision, reasoning):
         "reasoning": reasoning
     }
     st.session_state.firestore_db.append(entry)
+    
+    # 2. Save to Firestore (If configured and online)
+    if db:
+        try:
+            db.collection("mission_logs").add(entry)
+        except Exception:
+            pass # Fail silently to keep app running
 
 def get_mission_logs():
-    """Retrieves logs."""
+    """Retrieves logs from Session State (primary for demo speed)."""
     return pd.DataFrame(st.session_state.firestore_db)
 
 # --- SCIENTIFIC DATA ENGINE (Simulates .nc/.grib files) ---
@@ -108,57 +160,57 @@ def scan_saudi_sector():
     # Randomly select a condition for this "Live Scan"
     data = random.choice(conditions)
     
-    # Add noise to make it look like raw sensor data
+# ... (Keep Firestore Logic as is) ...
+
+# --- SCIENTIFIC DATA ENGINE (Simulates .nc/.grib files) ---
+# ... (Keep generate_weather_field as is) ...
+
+def scan_saudi_sector(sector_name):
+    """
+    Simulates scanning a specific region with climate biases.
+    """
+    # Get sector profile
+    profile = SAUDI_SECTORS[sector_name]
+    
+    # Simulate a variety of weather conditions
+    conditions = [
+        # Case 1: Perfect Seeding Candidate
+        {"prob": 85, "press": 650, "rad": 12.5, "opt": 15, "lwc": 0.005, "rh": profile['humidity_base'] + 10, "temp": -8},
+        # Case 2: Dry/No Cloud
+        {"prob": 10, "press": 900, "rad": 0.0, "opt": 1, "lwc": 0.000, "rh": profile['humidity_base'] - 10, "temp": 25},
+        # Case 3: Already Raining / Ice Phase
+        {"prob": 90, "press": 400, "rad": 22.0, "opt": 30, "lwc": 0.008, "rh": 90, "temp": -25},
+    ]
+    
+    # Randomly select a condition
+    data = random.choice(conditions)
+    
+    # APPLY GEOGRAPHIC BIAS
+    data['prob'] += profile['bias_prob']
+    data['temp'] += profile['bias_temp']
+    
+    # Clamp values to realistic ranges
+    data['prob'] = max(0, min(100, data['prob'])) # 0-100%
+    data['rh'] = max(5, min(100, data['rh']))
+    
+    # Add sensor noise
     data['prob'] += random.uniform(-2, 2)
     data['press'] += random.uniform(-10, 10)
     data['rad'] += random.uniform(-0.5, 0.5)
     
     return data
 
-# --- VISUALIZATION ENGINE ---
-def plot_scientific_matrix(data_points):
-    """
-    Generates the 2x4 Matrix of Scientific Plots.
-    """
-    fig, axes = plt.subplots(2, 4, figsize=(20, 8))
-    fig.patch.set_facecolor('#0e1117')
-    
-    # PLOT CONFIGURATION MAP
-    # Row 1: Satellite (Meteosat)
-    # Row 2: ERA5 (Atmospheric)
-    
-    plots = [
-        {"ax": axes[0,0], "title": "Cloud Probability", "cmap": "Blues", "data": generate_weather_field(mode="blobs") * data_points['prob']},
-        {"ax": axes[0,1], "title": "Cloud Top Pressure (hPa)", "cmap": "gray_r", "data": generate_weather_field(mode="blobs") * data_points['press']},
-        {"ax": axes[0,2], "title": "Effective Radius (µm)", "cmap": "viridis", "data": generate_weather_field(mode="blobs") * data_points['rad']},
-        {"ax": axes[0,3], "title": "Optical Depth", "cmap": "magma", "data": generate_weather_field(mode="blobs") * data_points['opt']},
-        
-        {"ax": axes[1,0], "title": "Liquid Water Content", "cmap": "Blues", "data": generate_weather_field() * data_points['lwc']},
-        {"ax": axes[1,1], "title": "Ice Water Content", "cmap": "PuBu", "data": generate_weather_field() * (data_points['lwc']/2)},
-        {"ax": axes[1,2], "title": "Relative Humidity (%)", "cmap": "Greens", "data": generate_weather_field(mode="blobs") * data_points['rh']},
-        {"ax": axes[1,3], "title": "Temperature (°C)", "cmap": "inferno", "data": generate_weather_field(mode="blobs") * data_points['temp']},
-    ]
-
-    for p in plots:
-        ax = p['ax']
-        ax.set_facecolor('#0e1117')
-        im = ax.imshow(p['data'], cmap=p['cmap'], aspect='auto')
-        ax.set_title(p['title'], color="white", fontsize=10)
-        ax.axis('off')
-        # Add a tiny colorbar
-        plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-
-    plt.tight_layout()
-    buf = BytesIO()
-    plt.savefig(buf, format="png", facecolor='#0e1117')
-    buf.seek(0)
-    return Image.open(buf)
+# ... (Keep plot_scientific_matrix as is) ...
 
 # --- SIDEBAR & SETUP ---
 with st.sidebar:
     st.image("https://cdn-icons-png.flaticon.com/512/414/414927.png", width=80)
     st.title("VisionRain")
-    st.caption("Kingdom Commander | v20.0")
+    st.caption("Kingdom Commander | v20.1")
+    
+    # NEW: REGION SELECTOR
+    st.markdown("### 🎯 Target Sector")
+    selected_sector = st.selectbox("Active Region", list(SAUDI_SECTORS.keys()))
     
     api_key = st.text_input("Gemini API Key", type="password", help="Enter Google AI Studio Key")
     
@@ -186,11 +238,19 @@ with st.sidebar:
 st.title("VisionRain Command Center")
 
 # INITIALIZE SESSION STATE DATA
-if 'scan_data' not in st.session_state:
-    st.session_state.scan_data = scan_saudi_sector()
+# Check if sector changed, if so, trigger re-scan
+if 'current_sector' not in st.session_state:
+    st.session_state.current_sector = selected_sector
+    st.session_state.scan_data = scan_saudi_sector(selected_sector)
+
+# If user changed dropdown, auto-refresh data
+if st.session_state.current_sector != selected_sector:
+    st.session_state.current_sector = selected_sector
+    st.session_state.scan_data = scan_saudi_sector(selected_sector)
+    st.rerun()
 
 if st.button("🔄 Rescan Sector (Refresh Data)"):
-    st.session_state.scan_data = scan_saudi_sector()
+    st.session_state.scan_data = scan_saudi_sector(selected_sector)
     st.rerun()
 
 current_data = st.session_state.scan_data
@@ -220,30 +280,33 @@ with tab1:
 
 # --- TAB 2: OPERATIONS ---
 with tab2:
-    st.header("Real-Time Sector Analysis: Jeddah Region")
+    st.header(f"Real-Time Sector Analysis: {selected_sector}")
     
     # Top Section: Map and Key Metrics
     c1, c2 = st.columns([3, 2])
     
     with c1:
         st.subheader("Target Identification Map")
-        # Jeddah Coordinates
-        m = folium.Map(location=[21.5433, 39.1728], zoom_start=9, tiles="CartoDB dark_matter")
+        
+        # DYNAMIC COORDINATES BASED ON SELECTION
+        sector_coords = SAUDI_SECTORS[selected_sector]['coords']
+        
+        m = folium.Map(location=sector_coords, zoom_start=9, tiles="CartoDB dark_matter")
         
         # Determine Color based on probability
         icon_color = "green" if current_data['prob'] > 60 else "gray"
         
         folium.CircleMarker(
-            location=[21.5433, 39.1728],
+            location=sector_coords,
             radius=50,
-            popup="Scan Sector Alpha",
+            popup=f"Scan Sector: {selected_sector}",
             color="#00e5ff",
             fill=True,
             fill_opacity=0.1
         ).add_to(m)
         
         folium.Marker(
-            [21.5433, 39.1728],
+            sector_coords,
             popup=f"Target Candidate\nProb: {current_data['prob']:.1f}%",
             icon=folium.Icon(color=icon_color, icon="cloud", prefix="fa")
         ).add_to(m)
@@ -360,5 +423,5 @@ with tab3:
                 st.write(response_text)
                 
             # 4. SAVE TO DATABASE
-            save_mission_log("Jeddah Sector", str(current_data), decision, response_text)
+            save_mission_log(selected_sector, str(current_data), decision, response_text)
             st.toast("Mission Logged to Database", icon="💾")
