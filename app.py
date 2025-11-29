@@ -77,75 +77,71 @@ def get_var(ds, keys, scale=1.0, fill_value=0.0):
             return data * scale
     return None
 
-# --- THE "ALL OF SAUDI" SCANNER ---
+# --- THE "ALL OF SAUDI" SCANNER (FIXED RESIZING) ---
 def scan_whole_kingdom(ds_sat, ds_era):
     """
     Scans the ENTIRE file content to find the best seedable pixel.
+    CRITICAL FIX: Resizes ALL arrays to match the 'prob' array shape to prevent index errors.
     """
-    # 1. Extract Full Grids
-    # We define a standard grid size based on the Satellite Data
-    # If files are missing, we return dummy 0s
-    
-    # SATELLITE
+    # 1. Extract Master Grid (Probability)
     prob = get_var(ds_sat, ['prob', 'cloud_probability'], 1.0)
-    if prob is None: prob = np.zeros((500, 500)) # Fallback size
     
-    rad = get_var(ds_sat, ['rad', 'effective', 'cre'], 1.0)
-    if rad is None: rad = np.zeros_like(prob)
+    # Fallback if probability is missing
+    if prob is None: 
+        prob = np.zeros((500, 500))
     
-    phase = get_var(ds_sat, ['phase', 'cph'], 1.0)
-    if phase is None: phase = np.zeros_like(prob)
+    target_shape = prob.shape
     
-    press = get_var(ds_sat, ['press', 'pressure'], 0.01) # Pa -> hPa
-    if press is None: press = np.zeros_like(prob)
-    
-    opt = get_var(ds_sat, ['opt', 'thickness'], 1.0)
-    if opt is None: opt = np.zeros_like(prob)
+    # --- SYNCHRONIZATION FUNCTION ---
+    def sync_grid(arr):
+        """Forces any array to match the Probability Grid's shape."""
+        if arr is None: 
+            return np.zeros(target_shape)
+        if arr.shape == target_shape:
+            return arr
+        # Calculate zoom factors
+        zf = np.array(target_shape) / np.array(arr.shape)
+        return zoom(arr, zf, order=0) # Nearest neighbor
 
-    # ERA5 (Needs Resizing to match Satellite Grid)
-    def resize_to_sat(arr):
-        if arr is None: return np.zeros_like(prob)
-        # Calculate zoom factor to match satellite shape
-        zf = np.array(prob.shape) / np.array(arr.shape)
-        return zoom(arr, zf, order=0) # Nearest neighbor to preserve raw values
+    # 2. Extract & Sync Satellite Metrics
+    rad = sync_grid(get_var(ds_sat, ['rad', 'effective', 'cre'], 1.0))
+    phase = sync_grid(get_var(ds_sat, ['phase', 'cph'], 1.0))
+    press = sync_grid(get_var(ds_sat, ['press', 'pressure'], 0.01))
+    opt = sync_grid(get_var(ds_sat, ['opt', 'thickness'], 1.0))
 
-    lwc = resize_to_sat(get_var(ds_era, ['clwc', 'liquid']))
-    ice = resize_to_sat(get_var(ds_era, ['ciwc', 'ice']))
-    rh = resize_to_sat(get_var(ds_era, ['r', 'humid']))
-    temp = resize_to_sat(get_var(ds_era, ['t', 'temp'], 1.0)) 
-    # Temp conversion K -> C
-    temp = np.where(temp > 100, temp - 273.15, temp)
+    # 3. Extract & Sync ERA5 Metrics
+    lwc = sync_grid(get_var(ds_era, ['clwc', 'liquid']))
+    ice = sync_grid(get_var(ds_era, ['ciwc', 'ice']))
+    rh = sync_grid(get_var(ds_era, ['r', 'humid']))
+    w = sync_grid(get_var(ds_era, ['w', 'vertical']))
     
-    w = resize_to_sat(get_var(ds_era, ['w', 'vertical']))
+    # Temp special handling
+    raw_temp = get_var(ds_era, ['t', 'temp'], 1.0)
+    if raw_temp is not None:
+        if np.max(raw_temp) > 100: raw_temp -= 273.15 # K to C
+    temp = sync_grid(raw_temp)
 
-    # 2. CALCULATE SEEDABILITY SCORE (Vectorized Physics)
-    # Logic: High Prob + Liquid Phase + Radius(5-14) + Good LWC
-    
+    # 4. CALCULATE SEEDABILITY SCORE (Vectorized Physics)
     score_map = np.zeros_like(prob)
     
-    # Criteria Masks
     mask_prob = (prob > 50).astype(float)
     mask_phase = ((phase > 0.5) & (phase < 1.5)).astype(float) # Liquid = 1
     mask_rad = ((rad > 5) & (rad < 15)).astype(float)
-    mask_temp = ((temp > -15) & (temp < 0)).astype(float) # Supercooled window
     
-    # Weighted Score
+    # Weighted Score: High Prob (40%) + Liquid (30%) + Good Radius (30%)
     score_map = (prob * 0.4) + (mask_phase * 100 * 0.3) + (mask_rad * 100 * 0.3)
     
-    # 3. FIND HOTSPOT (Max Score)
-    # If all 0, default to center
+    # 5. FIND HOTSPOT
     if np.max(score_map) > 0:
         y_hot, x_hot = np.unravel_index(np.argmax(score_map), score_map.shape)
     else:
         y_hot, x_hot = prob.shape[0]//2, prob.shape[1]//2
 
-    # 4. EXTRACT VISUALIZATION WINDOW (Around Hotspot)
-    # We show a 100x100 pixel window around the identified target for the dashboard
+    # 6. EXTRACT VISUALIZATION WINDOW (Safe Slicing)
     win = 60 # 120x120 total
     y_min, y_max = max(0, y_hot-win), min(prob.shape[0], y_hot+win)
     x_min, x_max = max(0, x_hot-win), min(prob.shape[1], x_hot+win)
     
-    # Pack data for UI
     data = {
         "grids": {
             "prob": prob[y_min:y_max, x_min:x_max],
@@ -168,7 +164,7 @@ def scan_whole_kingdom(ds_sat, ds_era):
             "w": float(w[y_hot, x_hot]),
             "score": float(score_map[y_hot, x_hot])
         },
-        "coords": (y_hot, x_hot) # Pixel coords in file
+        "coords": (y_hot, x_hot)
     }
     return data
 
@@ -177,7 +173,6 @@ def plot_real_grids(grids):
     fig, axes = plt.subplots(2, 5, figsize=(20, 7))
     fig.patch.set_facecolor('#0e1117')
     
-    # Plot Config
     plots = [
         (0,0, "Cloud Probability", "Blues", grids['prob'], 0, 100),
         (0,1, "Cloud Top Pressure", "gray_r", grids['press'], 200, 1000),
@@ -198,13 +193,12 @@ def plot_real_grids(grids):
         ax.set_title(title, color="white", fontsize=9, fontweight='bold')
         ax.axis('off')
         
-        # Center Crosshair to show AI Target
+        # Center Crosshair
         cy, cx = arr.shape[0]//2, arr.shape[1]//2
         ax.plot(cx, cy, 'r+', markersize=15, markeredgewidth=2)
         
         if "Phase" in title:
-            # Check center pixel for phase
-            val = arr[cy, cx]
+            val = arr[cy, cx] if arr.size > 0 else 0
             txt = "LIQUID" if 0.5 < val < 1.5 else "ICE" if val > 1.5 else "CLEAR"
             col = "cyan" if "LIQUID" in txt else "white"
             ax.text(0.5, 0.5, txt, color=col, ha="center", va="center", transform=ax.transAxes,
@@ -225,7 +219,7 @@ ds_sat, ds_era = load_data_files()
 with st.sidebar:
     st.image("https://cdn-icons-png.flaticon.com/512/414/414927.png", width=80)
     st.title("VisionRain")
-    st.caption("v70.0 | WHOLE KINGDOM SCAN")
+    st.caption("v71.0 | KINGDOM SCAN")
     
     if ds_sat: st.success("Meteosat Online")
     if ds_era: st.success("ERA5 Online")
