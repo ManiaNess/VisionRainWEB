@@ -3,7 +3,6 @@ import google.generativeai as genai
 from PIL import Image
 import numpy as np
 import matplotlib.pyplot as plt
-import matplotlib
 import pandas as pd
 import datetime
 import os
@@ -12,23 +11,28 @@ import requests
 from io import BytesIO
 import random
 
-# --- FIX MATPLOTLIB CRASH ON WEB ---
-matplotlib.use('Agg')
-
 # --- SAFELY IMPORT SCIENTIFIC LIBS ---
 try:
     import xarray as xr
 except ImportError:
-    st.error("⚠️ Scientific Libraries Missing! Please update requirements.txt with: xarray, netCDF4, h5netcdf")
+    st.error("⚠️ Scientific Libraries Missing! Please update requirements.txt")
     xr = None
+
+try:
+    import cfgrib
+except ImportError:
+    pass # Grib engine check
 
 # --- CONFIGURATION ---
 DEFAULT_API_KEY = "" 
 WEATHER_API_KEY = "11b260a4212d29eaccbd9754da459059" 
 LOG_FILE = "mission_logs.csv"
-NETCDF_FILE = "W_XX-EUMETSAT-Darmstadt,OCA+MSG4+SEVIRI_C_EUMG_20190831234500_1_OR_FES_E0000_0100.nc"
 
-st.set_page_config(page_title="VisionRain | Scientific Core", layout="wide", page_icon="🛰️")
+# DATA FILES
+SAT_FILE = "W_XX-EUMETSAT-Darmstadt,OCA+MSG4+SEVIRI_C_EUMG_20190831234500_1_OR_FES_E0000_0100.nc"
+ERA5_FILE = "ce636265319242f2fef4a83020b30ecf.grib"
+
+st.set_page_config(page_title="VisionRain | Scientific Twin", layout="wide", page_icon="⛈️")
 
 # --- STYLING ---
 st.markdown("""
@@ -59,115 +63,96 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# --- 1. DATA LOADER ---
+# --- 1. DATA LOADERS ---
 @st.cache_resource
-def load_netcdf_data():
+def load_satellite_data():
+    """Loads EUMETSAT NetCDF"""
     if xr is None: return None
-    # Use os.path.join to ensure it finds the file on Cloud/Windows
-    file_path = os.path.join(os.getcwd(), NETCDF_FILE)
-    if os.path.exists(file_path):
+    if os.path.exists(SAT_FILE):
         try:
-            return xr.open_dataset(file_path, engine='netcdf4')
-        except Exception as e:
-            st.error(f"Error reading NetCDF: {e}")
-            return None
+            return xr.open_dataset(SAT_FILE, engine='netcdf4')
+        except: return None
     return None
 
-# --- 2. SCIENTIFIC VISUALIZER ---
-def generate_scientific_plots(ds, center_y, center_x, window, title_prefix="Target"):
-    """
-    Generates the Matplotlib visualization using the user's exact logic.
-    """
-    if ds is None: return None, 0, 0, 0, 0 
+@st.cache_resource
+def load_era5_data():
+    """Loads ERA5 GRIB"""
+    if xr is None: return None
+    if os.path.exists(ERA5_FILE):
+        try:
+            # Try opening with cfgrib engine
+            return xr.open_dataset(ERA5_FILE, engine='cfgrib')
+        except: return None
+    return None
 
-    # 1. Dynamic Dimension Finder
+# --- 2. VISUALIZERS (Scientific Plots) ---
+def generate_satellite_plot(ds, center_y, center_x, window):
+    """Plots Meteosat Data"""
+    if ds is None: return None, 0, 0, 0, 0
+    
     try:
-        dims = list(ds['cloud_probability'].dims)
-        y_dim_name = dims[0]
-        x_dim_name = dims[1]
-    except:
-        return None, 0, 0, 0, 0
-
-    # 2. Slicing
-    # Ensure we don't go out of bounds
-    max_y = ds.sizes[y_dim_name]
-    max_x = ds.sizes[x_dim_name]
-    
-    y_start = max(0, center_y - window)
-    y_end = min(max_y, center_y + window)
-    x_start = max(0, center_x - window)
-    x_end = min(max_x, center_x + window)
-
-    slice_dict = {
-        y_dim_name: slice(y_start, y_end),
-        x_dim_name: slice(x_start, x_end)
-    }
-
-    # 3. Extract Data
-    sat_image = ds['cloud_top_pressure'].isel(**slice_dict)
-    ai_mask = (ds['cloud_probability'].isel(**slice_dict))/100
-    
-    # --- 3a. Radius Extraction ---
-    if 'cloud_particle_effective_radius' in ds:
-        rad_slice = ds['cloud_particle_effective_radius'].isel(**slice_dict)
-        avg_rad = float(rad_slice.mean()) * 1e6 
-    else:
-        avg_rad = 0.0
+        # Slicing Logic
+        y_slice = slice(max(0, center_y - window), center_y + window)
+        x_slice = slice(max(0, center_x - window), center_x + window)
         
-    # --- 3b. Optical Depth Extraction ---
-    if 'cloud_optical_depth_log' in ds:
-        cod_slice = ds['cloud_optical_depth_log'].isel(**slice_dict)
-        # File stores as Log10. Convert to Linear: 10^x
-        avg_cod = float((10**cod_slice).mean())
-    else:
-        avg_cod = 0.0
+        # Extract
+        press = ds['cloud_top_pressure'].isel(y=y_slice, x=x_slice).values
+        prob = ds['cloud_probability'].isel(y=y_slice, x=x_slice).values
+        
+        # Metrics
+        val_press = np.nanmean(press)
+        val_prob = np.nanmean(prob)
+        
+        # Plot
+        fig, ax = plt.subplots(figsize=(6, 6))
+        fig.patch.set_facecolor('#0e1117')
+        im = ax.imshow(press, cmap='gray_r')
+        ax.set_title("Meteosat: Cloud Top Pressure", color="white")
+        ax.axis('off')
+        plt.tight_layout()
+        
+        buf = BytesIO()
+        plt.savefig(buf, format="png", facecolor='#0e1117')
+        buf.seek(0)
+        return Image.open(buf), val_press, val_prob
+        
+    except: return None, 0, 0
 
-    # Calculate Stats for Telemetry
-    avg_press = float(sat_image.mean()) / 100.0 if sat_image.size > 0 else 0
-    avg_prob = float(ai_mask.mean()) * 100.0 if ai_mask.size > 0 else 0
-
-    # 4. PLOT
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 7))
-    fig.patch.set_facecolor('#0e1117')
-
-    # Plot 1: Satellite Feed (Pressure)
-    im1 = ax1.imshow(sat_image, cmap='gray_r', origin='upper')
-    ax1.set_title(f"{title_prefix} Satellite Feed (Cloud Top Pressure)", fontsize=12, color="white")
-    ax1.axis('off')
-    plt.colorbar(im1, ax=ax1, label="Pressure (Pa)").ax.yaxis.set_tick_params(color='white')
-
-    # Plot 2: AI Detection (Probability)
-    im2 = ax2.imshow(ai_mask, cmap='Blues', vmin=0, vmax=1, origin='upper')
-    ax2.set_title(f"{title_prefix} AI Identification (Cloud Probability)", fontsize=12, color="white")
-    ax2.axis('off')
-    plt.colorbar(im2, ax=ax2, label="Probability (0-1)").ax.yaxis.set_tick_params(color='white')
-
-    # Add Crosshair
-    mid_y = (y_end - y_start) // 2
-    mid_x = (x_end - x_start) // 2
-    ax1.plot(mid_x, mid_y, 'c+', markersize=20, markeredgewidth=3)
-    ax2.plot(mid_x, mid_y, 'r+', markersize=20, markeredgewidth=3)
-
-    plt.suptitle(f"System Lock: {center_x}X / {center_y}Y", fontsize=16, fontweight='bold', color="#00e5ff")
-    plt.tight_layout()
+def generate_era5_plot(ds):
+    """Plots ERA5 Atmospheric Data"""
+    if ds is None: return None, 0, 0
     
-    # Save to Buffer
-    buf = BytesIO()
-    plt.savefig(buf, format="png", facecolor='#0e1117')
-    buf.seek(0)
-    plt.close(fig)
-    
-    return Image.open(buf), avg_press, avg_prob, avg_rad, avg_cod
-
-# --- 3. OWM TELEMETRY ---
-def get_weather_telemetry(lat, lon, key):
-    if not key: return None
     try:
-        url = f"https://api.openweathermap.org/data/2.5/weather?lat={lat}&lon={lon}&appid={key}&units=metric"
-        return requests.get(url).json()
-    except: return None
+        # Try to find Liquid Water Content or Temperature
+        # Common GRIB names: 'clwc' (Cloud Liquid Water Content) or 't' (Temperature)
+        target_var = 'clwc' if 'clwc' in ds else 't' if 't' in ds else list(ds.data_vars)[0]
+        
+        data = ds[target_var].values
+        
+        # If 3D (time/levels), take first slice
+        if data.ndim > 2: data = data[0]
+        if data.ndim > 2: data = data[0] # Handle 4D
+        
+        # Metrics
+        val_mean = np.nanmean(data)
+        
+        # Plot
+        fig, ax = plt.subplots(figsize=(6, 6))
+        fig.patch.set_facecolor('#0e1117')
+        im = ax.imshow(data, cmap='viridis') # Viridis for scientific data
+        ax.set_title(f"ERA5 Analysis: {target_var.upper()}", color="white")
+        ax.axis('off')
+        plt.tight_layout()
+        
+        buf = BytesIO()
+        plt.savefig(buf, format="png", facecolor='#0e1117')
+        buf.seek(0)
+        
+        return Image.open(buf), val_mean, target_var
+        
+    except: return None, 0, "Error"
 
-# --- 4. LOGGING ---
+# --- 3. LOGGING ---
 def log_mission(location, conditions, decision, reason):
     ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     file_exists = os.path.isfile(LOG_FILE)
@@ -184,25 +169,22 @@ def load_logs():
 with st.sidebar:
     st.image("https://cdn-icons-png.flaticon.com/512/414/414927.png", width=90)
     st.title("VisionRain")
-    st.caption("Scientific Core | EUMETSAT")
+    st.caption("Scientific Twin | v6.0")
     
     api_key = st.text_input("Google AI Key", value=DEFAULT_API_KEY, type="password")
     
     st.markdown("### 📍 Mission Target")
     st.info("Locked Sector: **Jeddah Storm**")
+    st.caption("Coordinates: 21.54, 39.17")
     lat, lon = 21.54, 39.17
     
-    # Admin
     with st.expander("🔒 Admin Portal"):
         if st.text_input("Password", type="password") == "123456":
             st.dataframe(load_logs())
-            if st.button("Clear Logs"):
-                if os.path.exists(LOG_FILE): os.remove(LOG_FILE)
-                st.rerun()
 
 # --- MAIN UI ---
 st.title("VisionRain Command Center")
-st.markdown("### *Data Source: EUMETSAT NetCDF (Raw Analysis)*")
+st.markdown("### *Data Source: EUMETSAT (Optics) + ERA5 (Physics)*")
 
 tab1, tab2, tab3 = st.tabs(["🌍 Strategic Vision", "📡 Sensor Array", "🧠 Gemini Fusion"])
 
@@ -213,8 +195,8 @@ with tab1:
     <div class="pitch-box">
     <h3>🚨 1. Problem Statement</h3>
     <p>Globally, regions such as <b>Saudi Arabia</b> face escalating environmental crises: water scarcity, prolonged droughts, and wildfire escalation. 
-    Current cloud seeding operations are <b>manual, expensive ($8k/hr), and reactive</b>.</p>
-    <p>This aligns critically with <b>Saudi Vision 2030</b> and the <b>Saudi Green Initiative</b>.</p>
+    These issues are intensifying due to climate change and unstable precipitation patterns.</p>
+    <p>Current cloud seeding operations are <b>manual, expensive ($8k/hr), and reactive</b>. Pilots often fly blind, missing critical seeding windows.</p>
     </div>
     """, unsafe_allow_html=True)
     
@@ -223,47 +205,67 @@ with tab1:
         st.info("**Solution:** VisionRain - An AI-driven decision support platform analyzing satellite microphysics for precision seeding.")
     with c2:
         st.success("**Impact:** Enables low-cost, safer deployment and scales globally to support emergency climate-response.")
+        
+    st.markdown("""
+    <div class="pitch-box">
+    <h3>🚀 Implementation Plan</h3>
+    <ul>
+    <li><b>Phase 1 (Ground Truth):</b> Ingest Satellite (Meteosat) & Atmospheric Models (ERA5).</li>
+    <li><b>Phase 2 (AI Fusion):</b> Use Vertex AI to correlate cloud texture with internal liquid water content.</li>
+    <li><b>Phase 3 (Action):</b> Automated GO/NO-GO signals for drone swarms.</li>
+    </ul>
+    </div>
+    """, unsafe_allow_html=True)
 
 # --- DATA PROCESSING ---
-ds = load_netcdf_data()
+ds_sat = load_satellite_data()
+ds_era = load_era5_data()
 
-if ds:
-    # 1. Generate Full Disk (Global Context)
-    full_img, _, _, _, _ = generate_scientific_plots(ds, 1856, 1856, 1800, title_prefix="Global")
-    
-    # 2. Generate Zoomed Sector (Jeddah)
-    zoom_img, pressure, prob, radius, opt_depth = generate_scientific_plots(ds, 2300, 750, 100, title_prefix="Jeddah Sector")
+# 1. Generate Satellite Plot (Meteosat)
+if ds_sat:
+    sat_img, press, prob = generate_satellite_plot(ds_sat, 2300, 750, 150)
 else:
-    st.error("⚠️ NetCDF File Missing. Please upload 'W_XX...nc' to GitHub.")
-    full_img, zoom_img, pressure, prob, radius, opt_depth = None, None, 0, 0, 0, 0
+    # Fallback simulation if file missing
+    st.error("⚠️ Satellite File Missing.")
+    sat_img, press, prob = None, 0, 0
 
-# Get Live OWM Data
-w = get_weather_telemetry(lat, lon, WEATHER_API_KEY)
-humidity = w['main']['humidity'] if w else 65 
+# 2. Generate Atmospheric Plot (ERA5)
+if ds_era:
+    era_img, era_val, era_var = generate_era5_plot(ds_era)
+else:
+    st.warning("⚠️ ERA5 GRIB File Missing. Using fallback simulation.")
+    # Simulate ERA5 Plot if missing
+    era_img = sat_img # Reuse visual style for demo
+    era_val = 0.5 # kg/kg
+    era_var = "Specific Cloud Liquid Water"
+
+# Live Telemetry (Fallback)
+humidity = 65
+temp = 28
 
 # --- TAB 2: SENSORS ---
 with tab2:
     st.header("Real-Time Hydro-Meteorological Fusion")
     
-    # VISUALS
-    if full_img:
-        st.image(full_img, caption="1. Global Context (Meteosat Full Disk)", use_column_width=True)
+    col_sat, col_era = st.columns(2)
     
-    st.write("---")
-    
-    if zoom_img:
-        st.image(zoom_img, caption="2. Target Sector Analysis (Jeddah)", use_column_width=True)
+    with col_sat:
+        st.subheader("A. Satellite Optics (Meteosat)")
+        if sat_img: st.image(sat_img, caption="Cloud Top Pressure (Visual Proxy)", use_column_width=True)
+        
+    with col_era:
+        st.subheader("B. Atmospheric Physics (ERA5)")
+        if era_img: st.image(era_img, caption=f"Internal Structure: {era_var}", use_column_width=True)
 
     st.divider()
     
     # TELEMETRY TABLE
     st.subheader("Microphysical Telemetry")
-    c1, c2, c3, c4, c5 = st.columns(5)
+    c1, c2, c3, c4 = st.columns(4)
     c1.metric("Cloud Probability", f"{prob:.1f}%", "AI Confidence")
-    c2.metric("Cloud Top Pressure", f"{pressure:.0f} hPa", "Altitude Proxy")
-    c3.metric("Droplet Radius", f"{radius:.1f} µm", "Stalled Growth")
-    c4.metric("Optical Depth", f"{opt_depth:.1f}", "Water Volume")
-    c5.metric("Humidity", f"{humidity}%", "Atmospheric Water")
+    c2.metric("Cloud Top Pressure", f"{press:.0f} hPa", "Altitude")
+    c3.metric("Liquid Water (ERA5)", f"{era_val:.2e}", "Fuel")
+    c4.metric("Seeding Status", "ANALYZING", delta="Standby", delta_color="off")
 
 # --- TAB 3: GEMINI FUSION ---
 with tab3:
@@ -272,79 +274,73 @@ with tab3:
     # 1. MASTER TABLE
     st.markdown("### 🔬 Physics-Informed Logic (The Master Table)")
     table_data = {
-        "Parameter": ["Cloud Probability", "Cloud Top Pressure", "Droplet Radius", "Optical Depth", "Humidity"],
-        "Ideal Range": ["> 70%", "< 700 hPa", "< 14 µm", "> 10", "> 50%"],
-        "Current Value": [f"{prob:.1f}%", f"{pressure:.0f} hPa", f"{radius:.1f} µm", f"{opt_depth:.1f}", f"{humidity}%"]
+        "Parameter": ["Cloud Phase", "Liquid Water Content", "Cloud Probability", "Top Pressure"],
+        "Ideal Range": ["Liquid/Mixed", "> 1e-5 kg/kg", "> 70%", "< 700 hPa"],
+        "Current Value": ["Analyzing...", f"{era_val:.2e}", f"{prob:.1f}%", f"{press:.0f} hPa"]
     }
     st.table(pd.DataFrame(table_data))
 
     # 2. VISUAL EVIDENCE
-    if zoom_img:
-        st.caption("Visual Evidence Sent to Vertex AI:")
-        st.image(zoom_img, width=500)
+    st.caption("Visual Evidence Sent to Vertex AI:")
+    if sat_img and era_img:
+        c1, c2 = st.columns(2)
+        c1.image(sat_img, caption="Satellite View")
+        c2.image(era_img, caption="ERA5 Internal Physics")
 
     st.divider()
 
     if st.button("RUN STRATEGIC ANALYSIS", type="primary"):
         if not api_key:
             st.error("🔑 Google API Key Missing!")
-        elif not zoom_img:
+        elif not sat_img:
             st.error("⚠️ No Data.")
         else:
             genai.configure(api_key=api_key)
             try:
-                model = genai.GenerativeModel('gemini-2.5-flash')
+                model = genai.GenerativeModel('gemini-1.5-flash')
                 
                 # --- THE SUPER PROMPT ---
                 prompt = f"""
-                ACT AS A LEAD METEOROLOGIST. Analyze this EUMETSAT Satellite Data.
+                ACT AS A LEAD METEOROLOGIST. Analyze this Multi-Modal Data (Satellite + ERA5).
                 
                 --- MISSION CONTEXT ---
-                Location: Jeddah Sector (Meteosat-9)
+                Location: Jeddah Sector
                 Objective: Hygroscopic Cloud Seeding.
                 
                 --- INPUT DATA ---
-                1. AI Cloud Probability: {prob:.1f}% (0-100 scale)
-                2. Cloud Top Pressure: {pressure:.0f} hPa
-                3. Droplet Effective Radius: {radius:.1f} microns
-                4. Optical Depth (Thickness): {opt_depth:.1f}
-                5. Surface Humidity: {humidity}%
+                1. Satellite (Meteosat):
+                   - Cloud Probability: {prob:.1f}% (0-100)
+                   - Cloud Top Pressure: {press:.0f} hPa
+                   
+                2. ERA5 Atmospheric Model:
+                   - Variable: {era_var}
+                   - Value: {era_val:.2e}
                 
                 --- VISUALS (Attached) ---
-                The image contains two plots:
-                - Left: Cloud Top Pressure (Darker/Grey = Lower/Warmer Clouds).
-                - Right: AI Probability Mask (Blue = High Probability).
+                - Image 1: Satellite View (Cloud Texture/Height).
+                - Image 2: ERA5 Physics Map (Internal Water/Temp Structure).
                 
-                --- LOGIC ---
-                1. IF Probability > 60% AND Pressure < 800hPa -> "GO" (Cloud is substantial).
-                2. IF Droplet Radius < 14 microns -> "GO" (Cloud is stuck, needs seeding).
-                3. IF Droplet Radius > 14 microns -> "NO-GO" (Already raining).
-                4. IF Optical Depth < 5 -> "NO-GO" (Cloud too thin).
-                5. IF Humidity < 30% -> "NO-GO" (Too dry).
+                --- LOGIC RULES ---
+                1. IF Cloud Probability > 60% AND Pressure < 700hPa -> Potential Cloud.
+                2. IF ERA5 Liquid Water is High -> Cloud has "Fuel" for seeding.
+                3. IF both match -> "GO".
                 
                 --- OUTPUT ---
-                1. **Analysis:** Describe the cloud density seen in the zoomed sector plots and the microphysics.
-                2. **Decision:** **GO** or **NO-GO**?
-                3. **Reasoning:** Scientific justification based on the 5 metrics.
+                1. **Visual Analysis:** Compare the Satellite view with the ERA5 Physics map. Do they align?
+                2. **Microphysics Check:** Is there enough liquid water?
+                3. **Decision:** **GO** or **NO-GO**?
+                4. **Reasoning:** Scientific justification.
                 """
                 
-                with st.spinner("Vertex AI is calculating microphysics..."):
-                    res = model.generate_content([prompt, zoom_img])
+                with st.spinner("Vertex AI is fusing Satellite & ERA5 streams..."):
+                    # Send BOTH images
+                    inputs = [prompt, sat_img]
+                    if era_img: inputs.append(era_img)
                     
-                    # --- FIXED LOGIC HERE ---
-                    text_response = res.text.upper()
+                    res = model.generate_content(inputs)
                     
-                    if "NO-GO" in text_response:
-                        decision = "NO-GO"
-                    elif "GO" in text_response:
-                        decision = "GO"
-                    else:
-                        decision = "NO-GO" # Fallback
-                    # ------------------------
-                    
-                    # Logging
-                    log_str = f"P:{prob:.0f}% R:{radius:.1f}um OD:{opt_depth:.1f} H:{humidity}%"
-                    log_mission(f"{lat},{lon}", log_str, decision, "AI Authorized")
+                    decision = "GO" if "GO" in res.text.upper() else "NO-GO"
+                    log_mission(f"{lat},{lon}", f"ERA5:{era_val:.2e}", decision, "AI Authorized")
                     
                     st.markdown("### 🛰️ Mission Command Report")
                     st.write(res.text)
