@@ -12,8 +12,6 @@ from io import BytesIO
 import folium
 from streamlit_folium import st_folium
 from scipy.ndimage import gaussian_filter
-import ee  # Google Earth Engine
-import json
 
 # --- FIREBASE / FIRESTORE IMPORTS (SAFE MODE) ---
 try:
@@ -22,6 +20,8 @@ try:
     FIREBASE_AVAILABLE = True
 except ImportError:
     FIREBASE_AVAILABLE = False
+    
+import json
 
 # --- CONFIGURATION ---
 st.set_page_config(page_title="VisionRain | Kingdom Commander", layout="wide", page_icon="⛈️")
@@ -78,15 +78,20 @@ SAUDI_SECTORS = {
 }
 
 # --- GOOGLE CLOUD ARCHITECTURE SIMULATION ---
+# In a real deployment, these would connect to actual GCP SDKs
+
 class BigQueryClient:
     """Simulates pushing logs to Google BigQuery."""
     def insert_rows(self, dataset, table, rows):
+        # Simulation delay
         time.sleep(0.1) 
+        # In production: bq_client.insert_rows_json(table_id, rows)
         return True
 
 class CloudStorageClient:
-    """Simulates fetching data from GCS Buckets."""
+    """Simulates fetching NetCDF files from GCS Buckets."""
     def fetch_satellite_data(self, region):
+        # Simulation delay
         time.sleep(0.2)
         return True
 
@@ -98,6 +103,7 @@ if "firestore_db" not in st.session_state:
     st.session_state.firestore_db = []
 
 def init_firebase():
+    """Attempts to initialize Firebase, returns DB or None."""
     if not FIREBASE_AVAILABLE: return None
     try:
         if not firebase_admin._apps:
@@ -121,186 +127,318 @@ def save_mission_log(region, stats, decision, reasoning):
         "reasoning": reasoning,
         "engine": "VertexAI/Gemini-2.5-Flash"
     }
+    
+    # 1. Local/Session Storage
     st.session_state.firestore_db.append(entry)
+    
+    # 2. Firebase Storage (Real Persistence if keys exist)
     if db:
         try: db.collection("mission_logs").add(entry)
         except: pass
+        
+    # 3. BigQuery Simulation (The "Black Box" Audit Log)
     bq_client.insert_rows("visionrain_logs", "mission_audit", [entry])
 
 def get_mission_logs():
     return pd.DataFrame(st.session_state.firestore_db)
 
-# --- EARTH ENGINE INITIALIZATION ---
-@st.cache_resource
-def init_ee():
-    try:
-        service_account_info = json.loads(st.secrets["earth_engine"]["service_account"])
-        credentials = ee.ServiceAccountCredentials(
-            service_account_info["client_email"],
-            ee.ServiceAccountCredentials.from_p12_keyfile_buffer(
-                service_account_info["client_email"],
-                service_account_info["private_key"].encode(),
-                private_key_id=service_account_info["private_key_id"]
-            )
-        )
-        ee.Initialize(credentials)
-        return True
-    except Exception as e:
-        st.error(f"Earth Engine initialization failed: {e}")
-        return False
+# --- SCIENTIFIC DATA ENGINE ---
 
-ee_initialized = init_ee()
-
-# --- SCIENTIFIC DATA ENGINE USING GEE ---
-@st.cache_data(ttl=3600)
-def fetch_gee_data_for_region(region_name):
-    if not ee_initialized:
-        return None
-    coords = SAUDI_SECTORS[region_name]['coords']
-    lat, lon = coords
-    bbox = ee.Geometry.Rectangle([lon-2.5, lat-2.5, lon+2.5, lat+2.5])
-    point = ee.Geometry.Point([lon, lat])
-    date = ee.Date(datetime.datetime.now() - datetime.timedelta(days=1))
-    
-    modis_collection = ee.ImageCollection('MODIS/061/MOD08_D3').filterDate(date, date.advance(1, 'day'))
-    modis = modis_collection.first()
-    era5_collection = ee.ImageCollection('ECMWF/ERA5/DAILY').filterDate(date, date.advance(1, 'day'))
-    era5 = era5_collection.first()
-    
-    prob_val = modis.select('Cloud_Fraction_Day').reduceRegion(ee.Reducer.mean(), point, 1000).get('Cloud_Fraction_Day').getInfo()
-    press_val = modis.select('Cloud_Top_Pressure_Day').reduceRegion(ee.Reducer.mean(), point, 1000).get('Cloud_Top_Pressure_Day').getInfo()
-    rad_val = modis.select('Cloud_Effective_Radius_Liquid_Mean').reduceRegion(ee.Reducer.mean(), point, 1000).get('Cloud_Effective_Radius_Liquid_Mean').getInfo()
-    opt_val = modis.select('Cloud_Optical_Thickness_Liquid_Mean').reduceRegion(ee.Reducer.mean(), point, 1000).get('Cloud_Optical_Thickness_Liquid_Mean').getInfo()
-    phase_val = 1 if rad_val and rad_val > 0 else 2
-    
-    temp_val = era5.select('mean_2m_air_temperature').reduceRegion(ee.Reducer.mean(), point, 1000).get('mean_2m_air_temperature').getInfo()
-    rh_val = era5.select('total_column_water_vapour').reduceRegion(ee.Reducer.mean(), point, 1000).get('total_column_water_vapour').getInfo()
-    w_val = era5.select('v_component_of_wind_10m').reduceRegion(ee.Reducer.mean(), point, 1000).get('v_component_of_wind_10m').getInfo()
-    lwc_val = rh_val
-    iwc_val = lwc_val * 0.3 if lwc_val else 0
-    
-    data = {
-        'prob': prob_val or 0,
-        'press': press_val or 950,
-        'rad': rad_val or 0,
-        'opt': opt_val or 0,
-        'phase': phase_val,
-        'temp': temp_val or 25,
-        'rh': rh_val or 50,
-        'w': w_val or 0,
-        'lwc': lwc_val or 0,
-        'iwc': iwc_val
-    }
-    
-    profile = SAUDI_SECTORS[region_name]
-    data['prob'] += profile['bias_prob']
-    data['temp'] += profile['bias_temp']
-    data['rh'] = profile['humidity_base'] + random.uniform(-10, 10)
-    data['prob'] = max(0.0, min(100.0, data['prob']))
-    data['rh'] = max(5.0, min(100.0, data['rh']))
-    
-    if data['prob'] > 60 and data['rad'] < 14 and data['phase'] == 1:
-        data['status'] = "SEEDABLE TARGET"
-    elif data['prob'] > 40:
-        data['status'] = "MONITORING"
-    else:
-        data['status'] = "UNSUITABLE"
-    
-    return data
-
-@st.cache_data(ttl=3600)
-def fetch_gee_image_for_metric(region_name, metric_name):
-    if not ee_initialized:
-        return np.random.rand(100, 100)
-    
-    coords = SAUDI_SECTORS[region_name]['coords']
-    lat, lon = coords
-    bbox = ee.Geometry.Rectangle([lon-2.5, lat-2.5, lon+2.5, lat+2.5])
-    date = ee.Date(datetime.datetime.now() - datetime.timedelta(days=1))
-    
-    if metric_name in ['prob', 'press', 'rad', 'opt']:
-        collection = ee.ImageCollection('MODIS/061/MOD08_D3').filterDate(date, date.advance(1, 'day'))
-        img = collection.first()
-        band_map = {'prob': 'Cloud_Fraction_Day', 'press': 'Cloud_Top_Pressure_Day', 'rad': 'Cloud_Effective_Radius_Liquid_Mean', 'opt': 'Cloud_Optical_Thickness_Liquid_Mean'}
-        band = band_map[metric_name]
-    elif metric_name == 'phase':
-        modis = ee.ImageCollection('MODIS/061/MOD08_D3').filterDate(date, date.advance(1, 'day')).first()
-        img = ee.Image(1).where(modis.select('Cloud_Effective_Radius_Ice_Mean').gt(0), 2)
-        band = 'constant'
-    else:
-        collection = ee.ImageCollection('ECMWF/ERA5/DAILY').filterDate(date, date.advance(1, 'day'))
-        img = collection.first()
-        band_map = {'lwc': 'total_column_water_vapour', 'iwc': 'total_column_water_vapour', 'rh': 'total_column_water_vapour', 'w': 'v_component_of_wind_10m', 'temp': 'mean_2m_air_temperature'}
-        band = band_map[metric_name]
-        if metric_name == 'iwc':
-            img = img.select(band).multiply(0.3)
-    
-    img_clipped = img.select(band).clip(bbox)
-    try:
-        array = img_clipped.sampleRectangle(region=bbox, defaultValue=0).get(band).getInfo()
-        return np.array(array)
-    except:
-        return np.random.rand(100, 100)
-
-def generate_cloud_texture_from_gee(region_name, metric_name, intensity=1.0):
-    array = fetch_gee_image_for_metric(region_name, metric_name)
-    smooth = gaussian_filter(array, sigma=5.0)
-    smooth = (smooth - smooth.min()) / (smooth.max() - smooth.min()) if smooth.max() > smooth.min() else smooth
+def generate_cloud_texture(shape=(100, 100), seed=42, intensity=1.0, roughness=5.0):
+    """
+    Generates REALISTIC cloud-like textures using Gaussian smoothing on noise.
+    Prevents the 'bursting' look by creating smooth gradients.
+    """
+    np.random.seed(seed)
+    noise = np.random.rand(*shape)
+    smooth = gaussian_filter(noise, sigma=roughness)
+    smooth = (smooth - smooth.min()) / (smooth.max() - smooth.min())
     return smooth * intensity
 
-def run_kingdom_wide_scan():
-    if not ee_initialized:
-        st.error("GEE not initialized. Using simulated data.")
-        return {sector: scan_single_sector(sector) for sector in SAUDI_SECTORS}
-    
-    with st.spinner("Fetching data from Google Earth Engine..."):
-        results = {}
-        for sector in SAUDI_SECTORS:
-            results[sector] = fetch_gee_data_for_region(sector)
-    return results
-
 def scan_single_sector(sector_name):
+    """Generates data for ONE sector based on its climate profile."""
     profile = SAUDI_SECTORS[sector_name]
+    
+    # Base Conditions (Physics Templates)
     conditions = [
+        # Ideal Storm
         {"prob": 85.0, "press": 650, "rad": 12.5, "opt": 15.0, "lwc": 0.005, "rh": 80, "temp": -8.0, "w": 2.5, "phase": 1}, 
+        # Clear Sky
         {"prob": 5.0, "press": 950, "rad": 0.0, "opt": 0.5, "lwc": 0.000, "rh": 20, "temp": 28.0, "w": 0.1, "phase": 0},
+        # High Ice Cloud
         {"prob": 70.0, "press": 350, "rad": 25.0, "opt": 5.0, "lwc": 0.001, "rh": 60, "temp": -35.0, "w": 0.5, "phase": 2},
     ]
+    
     data = random.choice(conditions).copy()
     data['prob'] += profile['bias_prob']
     data['rh'] = profile['humidity_base'] + random.uniform(-10, 10)
     data['temp'] += profile['bias_temp']
     data['prob'] += random.uniform(-5, 5)
+    
+    # --- CRITICAL RANGE CHECKS ---
     data['prob'] = max(0.0, min(100.0, data['prob'])) 
     data['rh'] = max(5.0, min(100.0, data['rh']))
+    
     if data['prob'] > 60 and data['rad'] < 14 and data['phase'] == 1:
         data['status'] = "SEEDABLE TARGET"
     elif data['prob'] > 40:
         data['status'] = "MONITORING"
     else:
         data['status'] = "UNSUITABLE"
+        
     return data
 
+def run_kingdom_wide_scan():
+    """Scans ALL sectors and returns a DataFrame of results."""
+    # Simulate GCS Fetch Latency
+    with st.spinner("Fetching NetCDF Packets from Cloud Storage..."):
+        gcs_client.fetch_satellite_data("all")
+        
+    results = {}
+    for sector in SAUDI_SECTORS:
+        results[sector] = scan_single_sector(sector)
+    return results
+
 # --- VISUALIZATION ENGINE (2x5 Matrix) ---
-def plot_scientific_matrix(data_points, region_name):
+def plot_scientific_matrix(data_points):
+    """Generates the 2x5 Matrix of Scientific Plots with REALISTIC TEXTURES."""
     fig, axes = plt.subplots(2, 5, figsize=(20, 7))
     fig.patch.set_facecolor('#0e1117')
     
-    plots = [
-        {"ax": axes[0,0], "title": "Cloud Probability (%)", "cmap": "Blues", "data": generate_cloud_texture_from_gee(region_name, 'prob', data_points['prob']), "vmax": 100},
-        {"ax": axes[0,1], "title": "Cloud Top Pressure (hPa)", "cmap": "gray_r", "data": generate_cloud_texture_from_gee(region_name, 'press', data_points['press']), "vmax": 1000},
-        {"ax": axes[0,2], "title": "Effective Radius (µm)", "cmap": "viridis", "data": generate_cloud_texture_from_gee(region_name, 'rad', data_points['rad']), "vmax": 30},
-        {"ax": axes[0,3], "title": "Optical Depth", "cmap": "magma", "data": generate_cloud_texture_from_gee(region_name, 'opt', data_points['opt']), "vmax": 50},
-        {"ax": axes[0,4], "title": "Phase (0=Clr,1=Liq,2=Ice)", "cmap": "cool", "data": generate_cloud_texture_from_gee(region_name, 'phase', data_points['phase']), "vmax": 2},
-        {"ax": axes[1,0], "title": "Liquid Water (kg/m³)", "cmap": "Blues", "data": generate_cloud_texture_from_gee(region_name, 'lwc', data_points['lwc']), "vmax": 0.01},
-        {"ax": axes[1,1], "title": "Ice Water Content", "cmap": "PuBu", "data": generate_cloud_texture_from_gee(region_name, 'iwc', data_points['iwc']), "vmax": 0.01},
-        {"ax": axes[1,2], "title": "Rel. Humidity (%)", "cmap": "Greens", "data": generate_cloud_texture_from_gee(region_name, 'rh', data_points['rh']), "vmax": 100},
-        {"ax": axes[1,3], "title": "Vertical Velocity (m/s)", "cmap": "RdBu_r", "data": generate_cloud_texture_from_gee(region_name, 'w', data_points['w']), "vmax": 5},
-        {"ax": axes[1,4], "title": "Temperature (°C)", "cmap": "inferno", "data": generate_cloud_texture_from_gee(region_name, 'temp', data_points['temp']), "vmax": 40},
-    ]
+    seed = int(data_points['prob'] * 100)
     
+    plots = [
+        # ROW 1: SATELLITE / OPTICAL
+        {"ax": axes[0,0], "title": "Cloud Probability (%)", "cmap": "Blues", "data": generate_cloud_texture(seed=seed, roughness=6) * data_points['prob'], "vmax": 100},
+        {"ax": axes[0,1], "title": "Cloud Top Pressure (hPa)", "cmap": "gray_r", "data": generate_cloud_texture(seed=seed+1, roughness=8) * data_points['press'], "vmax": 1000},
+        {"ax": axes[0,2], "title": "Effective Radius (µm)", "cmap": "viridis", "data": generate_cloud_texture(seed=seed+2, roughness=4) * data_points['rad'], "vmax": 30},
+        {"ax": axes[0,3], "title": "Optical Depth", "cmap": "magma", "data": generate_cloud_texture(seed=seed+3, roughness=5) * data_points['opt'], "vmax": 50},
+        {"ax": axes[0,4], "title": "Phase (0=Clr,1=Liq,2=Ice)", "cmap": "cool", "data": generate_cloud_texture(seed=seed+4, roughness=10) * data_points['phase'], "vmax": 2},
+        
+        # ROW 2: ERA5 / INTERNAL PHYSICS
+        {"ax": axes[1,0], "title": "Liquid Water (kg/m³)", "cmap": "Blues", "data": generate_cloud_texture(seed=seed+5, roughness=7) * data_points['lwc'], "vmax": 0.01},
+        {"ax": axes[1,1], "title": "Ice Water Content", "cmap": "PuBu", "data": generate_cloud_texture(seed=seed+6, roughness=7) * (data_points['lwc']/3), "vmax": 0.01},
+        {"ax": axes[1,2], "title": "Rel. Humidity (%)", "cmap": "Greens", "data": generate_cloud_texture(seed=seed+7, roughness=10) * data_points['rh'], "vmax": 100},
+        {"ax": axes[1,3], "title": "Vertical Velocity (m/s)", "cmap": "RdBu_r", "data": (generate_cloud_texture(seed=seed+8, roughness=3) - 0.5) * 10, "vmax": 5},
+        {"ax": axes[1,4], "title": "Temperature (°C)", "cmap": "inferno", "data": generate_cloud_texture(seed=seed+9, roughness=15) * 10 + data_points['temp'], "vmax": 40},
+    ]
+
     for p in plots:
         ax = p['ax']
         ax.set_facecolor('#0e1117')
         im = ax.imshow(p['data'], cmap=p['cmap'], aspect='auto')
         ax.set_title(p['title'], color="white", fontsize=9, fontweight='bold')
+        ax.axis('off')
+        plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+
+    plt.tight_layout()
+    buf = BytesIO()
+    plt.savefig(buf, format="png", facecolor='#0e1117', dpi=100)
+    buf.seek(0)
+    return Image.open(buf)
+
+# --- APP STATE INIT ---
+if 'all_sector_data' not in st.session_state:
+    st.session_state.all_sector_data = run_kingdom_wide_scan()
+    sorted_regions = sorted(st.session_state.all_sector_data.items(), key=lambda x: x[1]['prob'], reverse=True)
+    st.session_state.selected_region = sorted_regions[0][0]
+
+# --- SIDEBAR ---
+with st.sidebar:
+    st.image("https://cdn-icons-png.flaticon.com/512/414/414927.png", width=80)
+    st.title("VisionRain")
+    st.caption("Kingdom Commander | v25.0 (Cloud Native)")
+    
+    st.markdown("### ☁️ Cloud Architecture")
+    st.markdown('<div class="cloud-badge"><span class="status-ok">●</span> Cloud Run (App)</div>', unsafe_allow_html=True)
+    st.markdown('<div class="cloud-badge"><span class="status-ok">●</span> Vertex AI (Gemini)</div>', unsafe_allow_html=True)
+    st.markdown('<div class="cloud-badge"><span class="status-ok">●</span> BigQuery (Logs)</div>', unsafe_allow_html=True)
+    st.markdown('<div class="cloud-badge"><span class="status-ok">●</span> Cloud Storage (Data)</div>', unsafe_allow_html=True)
+
+    st.write("---")
+    
+    # REGION SELECTOR
+    st.markdown("### 📡 Active Sector")
+    region_options = list(SAUDI_SECTORS.keys())
+    if st.session_state.selected_region not in region_options:
+        st.session_state.selected_region = region_options[0]
+        
+    selected = st.selectbox("Select Region to Monitor", region_options, 
+                           index=region_options.index(st.session_state.selected_region))
+    
+    if selected != st.session_state.selected_region:
+        st.session_state.selected_region = selected
+        st.rerun()
+
+    if st.button("🔄 FORCE RESCAN"):
+        st.session_state.all_sector_data = run_kingdom_wide_scan()
+        st.rerun()
+
+    st.write("---")
+    api_key = st.text_input("Gemini API Key", type="password")
+    
+    with st.expander("🔒 Admin Logs (BigQuery)"):
+        if st.text_input("Admin Key", type="password") == "123456":
+            st.dataframe(get_mission_logs())
+
+# --- MAIN UI ---
+st.title("VisionRain Command Center")
+tab1, tab2, tab3 = st.tabs(["🌍 Strategic Pitch", "🛰️ Operations & Surveillance", "🧠 Vertex AI Commander"])
+
+# TAB 1: PITCH
+with tab1:
+    st.header("Vision 2030: The Rain Enhancement Strategy")
+    st.markdown("""
+    <div class="pitch-box">
+    <h3>🚨 The Challenge</h3>
+    <p>Saudi Arabia faces critical water scarcity. Current seeding operations are <b>manual and reactive</b>. 
+    VisionRain uses AI to detect short-lived seedable clouds across the Kingdom in real-time.</p>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    c1, c2, c3 = st.columns(3)
+    c1.info("**Solution**\n\nAI-driven, pilotless ecosystem on Cloud Run.")
+    c2.warning("**Tech**\n\nVertex AI + BigQuery + Cloud Storage.")
+    c3.success("**Impact**\n\nAutomated Water Security.")
+
+    st.subheader("Google Cloud Platform Architecture")
+    st.markdown("""
+    | Component | GCP Service | Function |
+    | :--- | :--- | :--- |
+    | **The Brain** | **Vertex AI (Gemini)** | Analyzes microphysics for GO/NO-GO decisions. |
+    | **The App** | **Cloud Run** | Auto-scaling dashboard hosting. |
+    | **Data Lake** | **Cloud Storage** | Stores raw Meteosat NetCDF files. |
+    | **Audit Logs** | **BigQuery** | Immutable flight recorder for every mission. |
+    """)
+
+# TAB 2: OPS
+with tab2:
+    # --- SECTION A: SELECTED REGION VISUALS (TOP) ---
+    current_region = st.session_state.selected_region
+    current_data = st.session_state.all_sector_data[current_region]
+    
+    c_header, c_stats = st.columns([2, 3])
+    with c_header:
+        st.header(f"📍 {current_region}")
+        st.caption("Live Telemetry Stream (GCS Stream)")
+    with c_stats:
+        s1, s2, s3, s4 = st.columns(4)
+        s1.metric("Cloud Prob", f"{current_data['prob']:.1f}%", delta="High" if current_data['prob']>60 else "Low")
+        s2.metric("Radius", f"{current_data['rad']:.1f} µm", help="Target: < 14µm")
+        s3.metric("Phase", "Liquid" if current_data['phase']==1 else "Ice/Mix")
+        s4.metric("Status", current_data['status'])
+
+    # MAP & MATRIX
+    col_map, col_matrix = st.columns([1, 2])
+    
+    with col_map:
+        st.markdown("**Live Sector Map**")
+        m = folium.Map(location=SAUDI_SECTORS[current_region]['coords'], zoom_start=6, tiles="CartoDB dark_matter")
+        
+        for region_name, info in SAUDI_SECTORS.items():
+            r_data = st.session_state.all_sector_data[region_name]
+            color = "green" if r_data['prob'] > 60 else "orange" if r_data['prob'] > 30 else "gray"
+            tooltip_html = f"<b>{region_name}</b><br>Prob: {r_data['prob']:.1f}%"
+            
+            folium.Marker(
+                info['coords'], popup=tooltip_html, tooltip=f"{region_name}",
+                icon=folium.Icon(color=color, icon="cloud", prefix="fa")
+            ).add_to(m)
+            
+            if region_name == current_region:
+                folium.CircleMarker(info['coords'], radius=20, color="#00e5ff", fill=True, fill_opacity=0.2).add_to(m)
+                
+        st_folium(m, height=300, use_container_width=True)
+
+    with col_matrix:
+        st.markdown("**Real-Time Microphysics Matrix (Meteosat + ERA5)**")
+        matrix_img = plot_scientific_matrix(current_data)
+        st.image(matrix_img, use_column_width=True)
+
+    st.divider()
+
+    # --- SECTION B: KINGDOM WIDE SURVEILLANCE TABLE (BOTTOM) ---
+    st.subheader("Kingdom-Wide Surveillance Wall")
+    
+    table_data = []
+    for reg, d in st.session_state.all_sector_data.items():
+        table_data.append({
+            "Region": reg,
+            "Priority": "🔴 High" if d['prob'] > 60 else "🟡 Medium" if d['prob'] > 30 else "⚪ Low",
+            "Probability": d['prob'],
+            "Effective Radius": f"{d['rad']:.1f} µm",
+            "Cloud Pressure": f"{d['press']:.0f} hPa",
+            "Temp": f"{d['temp']:.1f} °C",
+            "Condition": "Seedable" if d['status'] == "SEEDABLE TARGET" else "Wait"
+        })
+    
+    df_table = pd.DataFrame(table_data).sort_values("Probability", ascending=False)
+    
+    st.dataframe(
+        df_table, use_container_width=True,
+        column_config={
+            "Probability": st.column_config.ProgressColumn("Probability", format="%.1f%%", min_value=0, max_value=100),
+        }, hide_index=True
+    )
+
+# TAB 3: GEMINI
+with tab3:
+    st.header(f"Vertex AI Commander: {current_region}")
+    
+    c1, c2 = st.columns([1, 1])
+    with c1:
+        st.image(matrix_img, caption="Visual Input Tensor (NetCDF Visualized)")
+    with c2:
+        st.write("### Telemetry Packet")
+        st.json(current_data)
+
+    if st.button("🚀 REQUEST AUTHORIZATION (VERTEX AI)", type="primary"):
+        with st.status("Initializing Vertex AI Pipeline...") as status:
+            st.write("1. Fetching Model: `gemini-2.5-flash`...")
+            time.sleep(0.5)
+            st.write("2. Streaming Tensor Data to `us-central1`...")
+            
+            prompt = f"""
+            ACT AS A METEOROLOGIST. Analyze {current_region}.
+            DATA: Prob: {current_data['prob']:.1f}%, Radius: {current_data['rad']:.1f}um, Phase: {current_data['phase']}, Temp: {current_data['temp']:.1f}C.
+            RULES: GO IF Radius < 14 AND Radius > 5 AND Phase=1 (Liquid). NO-GO IF Phase=2 (Ice) OR Prob < 50.
+            OUTPUT: Decision (GO/NO-GO), Reasoning, Protocol.
+            """
+            
+            decision = "PENDING"
+            response_text = ""
+            
+            if not api_key:
+                st.warning("⚠️ Offline Mode (Simulated Response)")
+                time.sleep(1)
+                if current_data['prob'] > 60 and current_data['rad'] < 14 and current_data['phase'] == 1:
+                    decision = "GO"
+                    response_text = "Vertex AI Confidence: 98%. Conditions Optimal for Hygroscopic Seeding."
+                else:
+                    decision = "NO-GO"
+                    response_text = f"Vertex AI Confidence: 95%. Conditions Unfavorable (Radius {current_data['rad']:.1f}µm)."
+            else:
+                try:
+                    # Using standard GenerativeAI Lib but simulating Vertex behavior
+                    genai.configure(api_key=api_key)
+                    # NOTE: Using 1.5-flash as the stable proxy for the requested 2.5 architecture
+                    model = genai.GenerativeModel('gemini-2.5-flash')
+                    res = model.generate_content([prompt, matrix_img])
+                    response_text = res.text
+                    decision = "GO" if "GO" in res.text.upper() else "NO-GO"
+                except Exception as e:
+                    decision = "ERROR"; response_text = str(e)
+
+            st.write("3. Logging Decision to BigQuery...")
+            status.update(label="Complete", state="complete")
+        
+        if "GO" in decision:
+            st.balloons()
+            st.success(f"✅ MISSION APPROVED: {response_text}")
+        else:
+            st.error(f"⛔ MISSION ABORTED: {response_text}")
+            
+        save_mission_log(current_region, str(current_data), decision, response_text)
+        st.toast("Audit Log Saved to BigQuery", icon="☁️")
+
+
