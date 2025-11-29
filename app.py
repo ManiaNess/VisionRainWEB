@@ -59,52 +59,55 @@ except Exception as e:
     GEE_ACTIVE = False
     AUTH_ERROR = str(e)
 
-# --- DATA ENGINE (Collects all 10 Metrics) ---
+# --- DATA ENGINE (Now uses dedicated GEE bands for all 10 metrics) ---
 @st.cache_data(ttl=600)
 def get_data(lat, lon):
     if not GEE_ACTIVE:
         # Full SIMULATION fallback (Only if connection failed)
         random.seed(int(lat*100))
-        temp_val = random.uniform(-10, 30)
-        
         return {
-            "Temp": temp_val, "Pressure": 750, "Radius": random.uniform(5, 25), "OptDepth": 15, "Phase": 1 if temp_val > -10 else 2,
+            "Temp": random.uniform(-10, 30), "Pressure": 750, "Radius": random.uniform(5, 25), "OptDepth": 15, "Phase": 1,
             "LiquidWater": 0.005, "IceWater": 0.001, "Humidity": 70, "VertVel": 2.0, "Source": "SIMULATION (Offline)"
         }
 
     try:
         point = ee.Geometry.Point([lon, lat])
         
-        # 1. MODIS (Cloud Top/Optical) - For Radius, Pressure, Optical Depth
-        modis = ee.ImageCollection("MODIS/006/MOD06_L2").filterDate('2023-01-01', '2024-01-01').first()
-        # 2. ERA5 (Internal Physics) - For Temperature, Vertical Velocity, Humidity (Approximation)
-        era5 = ee.ImageCollection("ECMWF/ERA5_LAND/HOURLY").filterDate('2023-01-01', '2024-01-01').first()
+        # Datasets
+        # ERA5 Full (Includes Vertical Velocity, Relative Humidity at pressure levels)
+        era5 = ee.ImageCollection("ECMWF/ERA5/HOURLY").filterDate('2024-01-01', '2024-01-31').first() 
+        # MODIS (Cloud Microphysics, Cloud Top Pressure, Radius)
+        modis = ee.ImageCollection("MODIS/006/MOD06_L2").filterDate('2024-01-01', '2024-01-31').first()
         
-        # Combine bands to pull data
-        combined = era5.addBands(modis)
+        # Combine bands and select bands we need
+        combined = era5.select('temperature_2m', 'relative_humidity_2m', 'vertical_velocity').addBands(
+            modis.select('Cloud_Effective_Radius', 'Cloud_Top_Pressure', 'Cloud_Optical_Thickness', 'Cloud_Phase_Optical')
+        )
         val = combined.reduceRegion(ee.Reducer.mean(), point, 5000).getInfo()
         
-        # --- EXTRACTING REAL DATA ---
-        temp_k = val.get('temperature_2m', 300) # ERA5
-        temp = (temp_k - 273.15) # Convert to Celsius
-        rad = val.get('Cloud_Effective_Radius', 0) or 0 # MODIS
-        pressure = val.get('Cloud_Top_Pressure', 700) or 700 # MODIS
-        opt_depth = val.get('Cloud_Optical_Thickness', 10) or 10 # MODIS
-        
-        # --- DERIVED/APPROXIMATED GEE METRICS (BASED ON GEE BANDS) ---
-        humidity = val.get('total_precipitation', 0) * 1000 + 50 # Approximation: Total Precip used for proxy
-        liquid_water = (rad / 1500) if rad > 0 else 0 
+        # --- EXTRACTING REAL GEE DATA ---
+        temp = (val.get('temperature_2m', 300) - 273.15)
+        rad = val.get('Cloud_Effective_Radius', 0) or 0
+        pressure = val.get('Cloud_Top_Pressure', 700) or 700
+        opt_depth = val.get('Cloud_Optical_Thickness', 10) or 10
+        vert_vel = val.get('vertical_velocity', 0) or 0
+        humidity = val.get('relative_humidity_2m', 50) or 50 # %
+        phase_raw = val.get('Cloud_Phase_Optical', 1) or 1 
+
+        # --- DERIVED LOGIC ---
+        # Cloud Water Path (LWC/IWC Proxy)
+        cloud_water_path = (rad * opt_depth * 0.001) if rad > 0 else 0 
         
         return {
             "Temp": temp,
             "Pressure": pressure,
             "Radius": rad,
             "OptDepth": opt_depth,
-            "Phase": 1 if temp > -10 else 2,
-            "LiquidWater": liquid_water, 
-            "IceWater": liquid_water / 2, # Approximation
-            "Humidity": min(100, humidity),
-            "VertVel": 1.5 + random.uniform(-1, 1), # Simplified (Full VV requires complex GEE bands not easily available on surface layers)
+            "Phase": 1 if phase_raw < 5 else 2, # Simplifying MODIS codes: 1=Liquid, >5=Ice/Mixed
+            "LiquidWater": cloud_water_path * 0.75, # 75% of CWP is LWC
+            "IceWater": cloud_water_path * 0.25, # 25% of CWP is IWC
+            "Humidity": humidity,
+            "VertVel": vert_vel * -100, # Converting to standard m/s and scaling for display
             "Source": "SATELLITE (Active)"
         }
     except Exception as e:
@@ -129,6 +132,7 @@ def plot_scientific_matrix(data_points):
 
     fig, axes = plt.subplots(2, 5, figsize=(20, 7))
     fig.patch.set_facecolor('#0e1117')
+    # Cloud Probability is derived for the matrix visual
     data_points["Prob"] = 100 if data_points["Radius"] > 5 and data_points["Phase"] == 1 else 10
 
     for i, p in enumerate(plots_config):
@@ -211,7 +215,6 @@ with tab2:
     
     st.subheader("🔬 Microphysics Matrix (Meteosat + ERA5)")
     matrix_img = plot_scientific_matrix(region_data)
-    
     st.image(matrix_img, use_column_width=True)
     
     st.markdown("---")
