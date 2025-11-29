@@ -63,42 +63,48 @@ except Exception as e:
 @st.cache_data(ttl=600)
 def get_data(lat, lon):
     if not GEE_ACTIVE:
-        # Full SIMULATION fallback if GEE fails (for safety)
+        # Full SIMULATION fallback (Only if connection failed)
         random.seed(int(lat*100))
         temp_val = random.uniform(-10, 30)
-        prob_val = random.uniform(10, 95)
-        rad_val = random.uniform(5, 25)
         
         return {
-            "Temp": temp_val, "Pressure": 750, "Radius": rad_val, "OptDepth": 15, "Phase": 1 if temp_val > -10 else 2,
+            "Temp": temp_val, "Pressure": 750, "Radius": random.uniform(5, 25), "OptDepth": 15, "Phase": 1 if temp_val > -10 else 2,
             "LiquidWater": 0.005, "IceWater": 0.001, "Humidity": 70, "VertVel": 2.0, "Source": "SIMULATION (Offline)"
         }
 
     try:
         point = ee.Geometry.Point([lon, lat])
         
-        # ERA5 (Internal Physics)
-        era5 = ee.ImageCollection("ECMWF/ERA5_LAND/HOURLY").filterDate('2023-01-01', '2024-01-01').first()
-        # MODIS (Cloud Top/Optical)
+        # 1. MODIS (Cloud Top/Optical) - For Radius, Pressure, Optical Depth
         modis = ee.ImageCollection("MODIS/006/MOD06_L2").filterDate('2023-01-01', '2024-01-01').first()
+        # 2. ERA5 (Internal Physics) - For Temperature, Vertical Velocity, Humidity (Approximation)
+        era5 = ee.ImageCollection("ECMWF/ERA5_LAND/HOURLY").filterDate('2023-01-01', '2024-01-01').first()
         
+        # Combine bands to pull data
         combined = era5.addBands(modis)
         val = combined.reduceRegion(ee.Reducer.mean(), point, 5000).getInfo()
         
-        # Map values to the 10 required metrics (using approximations where direct GEE bands are missing)
-        temp = (val.get('temperature_2m', 300) - 273.15)
-        rad = val.get('Cloud_Effective_Radius', 0) or 0
+        # --- EXTRACTING REAL DATA ---
+        temp_k = val.get('temperature_2m', 300) # ERA5
+        temp = (temp_k - 273.15) # Convert to Celsius
+        rad = val.get('Cloud_Effective_Radius', 0) or 0 # MODIS
+        pressure = val.get('Cloud_Top_Pressure', 700) or 700 # MODIS
+        opt_depth = val.get('Cloud_Optical_Thickness', 10) or 10 # MODIS
+        
+        # --- DERIVED/APPROXIMATED GEE METRICS (BASED ON GEE BANDS) ---
+        humidity = val.get('total_precipitation', 0) * 1000 + 50 # Approximation: Total Precip used for proxy
+        liquid_water = (rad / 1500) if rad > 0 else 0 
         
         return {
             "Temp": temp,
-            "Pressure": 700 + random.uniform(-50, 50), # Placeholder for pressure level
+            "Pressure": pressure,
             "Radius": rad,
-            "OptDepth": val.get('Cloud_Optical_Thickness', 10) or 10,
+            "OptDepth": opt_depth,
             "Phase": 1 if temp > -10 else 2,
-            "LiquidWater": (rad / 1500) if rad > 0 else 0, # Approximation
-            "IceWater": 0.001, 
-            "Humidity": 75 + random.uniform(-5, 5), # Simplified
-            "VertVel": 1.5 + random.uniform(-1, 1), # Simplified
+            "LiquidWater": liquid_water, 
+            "IceWater": liquid_water / 2, # Approximation
+            "Humidity": min(100, humidity),
+            "VertVel": 1.5 + random.uniform(-1, 1), # Simplified (Full VV requires complex GEE bands not easily available on surface layers)
             "Source": "SATELLITE (Active)"
         }
     except Exception as e:
@@ -123,21 +129,16 @@ def plot_scientific_matrix(data_points):
 
     fig, axes = plt.subplots(2, 5, figsize=(20, 7))
     fig.patch.set_facecolor('#0e1117')
-    
-    # Calculate Cloud Probability for display
-    data_points["Prob"] = 100 if data_points["Radius"] > 5 else 10 # Derived for visualization
+    data_points["Prob"] = 100 if data_points["Radius"] > 5 and data_points["Phase"] == 1 else 10
 
     for i, p in enumerate(plots_config):
         row = i // 5
         col = i % 5
         ax = axes[row, col]
-        
-        # Use data value to influence texture intensity
         intensity = data_points.get(p["metric"], 0) / p["max"]
         
         ax.set_facecolor('#0e1117')
         
-        # Simple noise texture generation
         np.random.seed(int(data_points.get("Radius", 10) * 100) + i)
         noise = np.random.rand(50, 50)
         data = gaussian_filter(noise, sigma=3) * max(0.1, intensity)
@@ -154,7 +155,6 @@ def plot_scientific_matrix(data_points):
     return Image.open(buf)
 
 # --- UI & WORKFLOW (KINGDOM COMMANDER) ---
-
 with st.sidebar:
     st.title("VisionRain | System Status")
     
@@ -165,13 +165,11 @@ with st.sidebar:
     
     st.divider()
     
-    # 1. Auto-Scan/Target Identification (Sector Selector)
     st.subheader("📡 Active Sector Selection")
     region_options = list(SAUDI_SECTORS.keys())
     selected_region_name = st.selectbox("Select Region to Monitor", region_options)
     
     if st.button("🔄 FORCE SATELLITE RESCAN", type="primary"):
-        # Clear cache to force fresh GEE call
         st.cache_data.clear()
         st.rerun()
 
@@ -183,50 +181,44 @@ with st.sidebar:
 st.title("VisionRain | Kingdom Commander")
 tab1, tab2, tab3 = st.tabs(["🌎 Strategic Pitch", "🛰️ Operations & Wall", "🧠 AI Decision Engine"])
 
-# Get data for selected region
 coords = SAUDI_SECTORS[selected_region_name]
 region_data = get_data(coords[0], coords[1])
 
 with tab1:
     st.header("Vision 2030: Rain Enhancement Strategy")
     st.markdown("---")
-    # This is where your requested Problem Statement/Solution text goes.
+    st.markdown(f"**Problem Statement:** Current cloud seeding operations are manual, costly, and miss short-lived seedable opportunities. This system replaces that with an AI-driven, data-first approach aligned with Saudi Vision 2030.")
 
 with tab2:
-    # --- Live Sector Map ---
     st.header(f"📍 {selected_region_name} - Live Telemetry")
     col_map, col_metric = st.columns([1, 2])
     
     with col_map:
-        # Folium Map
         m = folium.Map(location=coords, zoom_start=6, tiles="CartoDB dark_matter")
         folium.Marker(coords, tooltip=selected_region_name, icon=folium.Icon(color="blue", icon="cloud")).add_to(m)
         st_folium(m, height=350, use_container_width=True)
         st.caption(f"Data Source: {region_data['Source']}")
 
     with col_metric:
-        # Display Core Metrics
+        st.markdown("### Core Cloud Microphysics")
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Cloud Temp", f"{region_data['Temp']:.1f}°C")
         c2.metric("Eff. Radius", f"{region_data['Radius']:.1f} µm", help="Target: 5µm - 14µm")
         c3.metric("Phase", "Liquid" if region_data['Phase']==1 else "Ice")
-        c4.metric("Humidity", f"{region_data['Humidity']:.0f}%")
+        c4.metric("Vert. Velocity", f"{region_data['VertVel']:.1f} m/s")
 
     st.markdown("---")
     
-    # 4. The Visual Dashboard ("The Wall") - 2x5 Matrix
     st.subheader("🔬 Microphysics Matrix (Meteosat + ERA5)")
     matrix_img = plot_scientific_matrix(region_data)
+    
     st.image(matrix_img, use_column_width=True)
     
     st.markdown("---")
 
-    # 5. The Visual table (Kingdom-Wide Surveillance)
     st.subheader("Kingdom-Wide Surveillance")
-    # Generate data for all regions for the table (can be simulated or live check)
     table_data = []
     for reg_name, reg_coords in SAUDI_SECTORS.items():
-        # Get simplified metrics for the table
         temp_data = get_data(reg_coords[0], reg_coords[1])
         table_data.append({
             "Region": reg_name,
