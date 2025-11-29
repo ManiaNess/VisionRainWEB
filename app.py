@@ -46,7 +46,6 @@ st.markdown("""
     """, unsafe_allow_html=True)
 
 # --- SAUDI SECTOR CONFIGURATION ---
-# Note: Coords are [Lat, Lon] for Folium compatibility
 SAUDI_SECTORS = {
     "Jeddah (Red Sea Coast)": {
         "coords": [21.5433, 39.1728], 
@@ -104,15 +103,21 @@ def save_mission_log(region, stats, decision, reasoning):
 def get_mission_logs():
     return pd.DataFrame(st.session_state.firestore_db)
 
-# --- MISSION PLANNER FUNCTIONS ---
+# --- MISSION PLANNER FUNCTIONS (MODIFIED) ---
 
 def find_best_target(all_data):
-    """Identifies the best seedable cloud based on physics rules."""
+    """
+    Identifies the best seedable cloud based on physics rules.
+    Returns the target dict OR a dictionary with the failure reason.
+    """
     best_candidate = None
     best_prob = 0
     
+    # Track overall state for failure reporting
+    reasons = {'TOO_COLD': 0, 'TOO_LARGE': 0, 'LOW_PROB': 0}
+    total_regions = len(all_data)
+    
     for region_name, data in all_data.items():
-        # Apply the seeding criteria (Radius < 14, Phase=Liquid, Prob > 50)
         is_seedable = (data['rad'] < 14) and (data['rad'] > 5) and (data['phase'] == 1) and (data['prob'] > 50)
         
         if is_seedable and data['prob'] > best_prob:
@@ -122,11 +127,35 @@ def find_best_target(all_data):
                 "coords": SAUDI_SECTORS[region_name]['coords'],
                 "prob": data['prob']
             }
-            
-    return best_candidate
+        
+        # Analyze why it failed (if not seedable)
+        if not is_seedable:
+            if data['phase'] == 2 or data['temp'] < -15:
+                reasons['TOO_COLD'] += 1
+            elif data['rad'] >= 14:
+                reasons['TOO_LARGE'] += 1
+            elif data['prob'] <= 50:
+                reasons['LOW_PROB'] += 1
+                
+    if best_candidate:
+        return best_candidate
+    else:
+        # Determine the dominant reason for failure across the Kingdom
+        dominant_reason = max(reasons, key=reasons.get)
+        
+        if reasons[dominant_reason] > 0.6 * total_regions:
+            if dominant_reason == 'TOO_COLD':
+                return {"failure_reason": "Cloud conditions are predominantly below the ideal -15°C threshold (Ice Phase dominant). Seeding is not recommended."}
+            elif dominant_reason == 'TOO_LARGE':
+                return {"failure_reason": "Cloud droplet radii are too large (>14µm) across the Kingdom. Natural precipitation is already likely."}
+            else:
+                return {"failure_reason": "Insufficient cloud coverage or low probability (<50%) detected across all sectors."}
+        else:
+            return {"failure_reason": "No single region meets all seeding criteria simultaneously."}
+
 
 def find_launch_base(target_coords):
-    """Finds the closest launch base to the target cloud using Euclidean distance."""
+    """Finds the closest launch base to the target cloud."""
     target_lat, target_lon = target_coords
     closest_base = None
     min_distance = float('inf')
@@ -134,7 +163,6 @@ def find_launch_base(target_coords):
     for base_name, base_info in SAUDI_SECTORS.items():
         base_lat, base_lon = base_info['coords']
         
-        # Calculate approximate distance (Euclidean distance on coordinates)
         distance = math.sqrt((base_lat - target_lat)**2 + (base_lon - target_lon)**2)
         
         if distance < min_distance:
@@ -145,14 +173,11 @@ def find_launch_base(target_coords):
 
 def generate_mission_map(base, target):
     """Creates a Folium map showing the flight path."""
-    
-    # Calculate map center for visualization (average of base and target coordinates)
     center_lat = (base['coords'][0] + target['coords'][0]) / 2
     center_lon = (base['coords'][1] + target['coords'][1]) / 2
     
     m = folium.Map(location=[center_lat, center_lon], zoom_start=6, tiles="CartoDB dark_matter")
     
-    # Draw Flight Path (straight line)
     folium.PolyLine(
         locations=[base['coords'], target['coords']],
         color="red",
@@ -161,14 +186,12 @@ def generate_mission_map(base, target):
         tooltip=f"Mission Path: {base['name']} to {target['region']}"
     ).add_to(m)
     
-    # Mark Launch Base
     folium.Marker(
         base['coords'],
         popup=f"LAUNCH BASE: {base['name']}",
         icon=folium.Icon(color="green", icon="plane", prefix="fa")
     ).add_to(m)
     
-    # Mark Target Cloud
     folium.Marker(
         target['coords'],
         popup=f"TARGET CLOUD: {target['region']} ({target['prob']:.1f}% Prob)",
@@ -346,22 +369,27 @@ with tab3:
     st.header(f"🧠 Mission Control: {current_region}")
     st.markdown("---")
     
-    best_target = find_best_target(st.session_state.all_sector_data)
+    # Run the logic to find the best target OR the reason for failure
+    mission_status = find_best_target(st.session_state.all_sector_data)
     
     if st.button("🚀 REQUEST AUTHORIZATION & PLOT MISSION PATH", type="primary"):
-        if not best_target:
-            st.error("⛔ MISSION ABORTED: No Seedable Cloud Candidates Found.")
-            st.warning("Review Kingdom-Wide Surveillance for MOINTORING status.")
+        
+        if "failure_reason" in mission_status:
+            # Display Abort Reason
+            st.error("⛔ MISSION ABORTED: Kingdom-Wide Scan Failed.")
+            st.warning(f"**Justification:** {mission_status['failure_reason']} and a table why")
+            
         else:
+            best_target = mission_status
+            
             # Step 1: Find Launch Base and Plot Path
             launch_base = find_launch_base(best_target['coords'])
             mission_map = generate_mission_map(launch_base, best_target)
             
-            # Step 2: Request Gemini Decision
+            # Step 2: Request Gemini Decision (Simplified Simulation)
             with st.status("Initializing Vertex AI Pipeline...") as status:
-                status.update(label="1. Awaiting Gemini Decision...")
+                status.update(label="1. Awaiting Gemini Decision...", state="running")
                 
-                # ... (Gemini decision logic remains the same) ...
                 prompt = f"""
                 ACT AS A METEOROLOGIST. Analyze {best_target['region']} for deployment.
                 DATA: {json.dumps(st.session_state.all_sector_data[best_target['region']])}.
@@ -369,23 +397,20 @@ with tab3:
                 OUTPUT: Decision (GO/NO-GO), Reasoning, Protocol.
                 """
                 
-                response_text = ""
-                decision = "GO" # Assume GO since we pre-filtered for the best target
+                time.sleep(2) # Simulate processing time
                 
-                # Simulated Gemini Decision (since no key is guaranteed)
-                status.update(label="2. Awaiting Gemini Decision...", state="running")
-                time.sleep(2) 
-                
-                response_text = f"DECISION: GO | REASONING: Optimal microphysics (Radius {current_data['rad']:.1f}µm, Liquid Phase). | PROTOCOL: Launch drone from {launch_base['name']}."
-                
+                # Simplified GO/NO-GO for display stability
+                if best_target['prob'] > 70:
+                    response_text = f"DECISION: GO | REASONING: Optimal microphysics (Radius {current_data['rad']:.1f}µm, Liquid Phase). | PROTOCOL: Launch drone from {launch_base['name']}."
+                    st.success(f"✅ MISSION APPROVED: LAUNCH FROM **{launch_base['name']}**")
+                    
+                    st.subheader("🗺️ Autonomous Drone Flight Path")
+                    st_folium(mission_map, height=500, use_container_width=True)
+                else:
+                    st.error("⛔ AI Decision Override: Probability too low for immediate deployment.")
+                    response_text = "Decision Override: Probability too low."
+
                 status.update(label="3. Mission Log Complete.", state="complete")
 
-            # Step 3: Display Results
-            if "GO" in decision:
-                st.success(f"✅ MISSION APPROVED: LAUNCH FROM **{launch_base['name']}**")
-                st.markdown(f"**Target Cloud:** {best_target['region']} ({best_target['prob']:.1f}% Probability)")
-                
-                st.subheader("🗺️ Autonomous Drone Flight Path")
-                st_folium(mission_map, height=500, use_container_width=True)
-            else:
-                st.error(f"⛔ MISSION ABORTED: {response_text}")
+            # Step 4: Log the Outcome
+            save_mission_log(best_target['region'], st.session_state.all_sector_data[best_target['region']], "GO", response_text)
