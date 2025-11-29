@@ -2,9 +2,9 @@ streamlit
 google-generativeai
 earthengine-api
 geemap
+folium
+streamlit-folium
 matplotlib
 pandas
 scipy
 numpy
-folium
-streamlit-folium
