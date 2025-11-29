@@ -372,7 +372,7 @@ with tab3:
             else:
                 try:
                     genai.configure(api_key=api_key)
-                    model = genai.GenerativeModel('gemini-1.5-flash')
+                    model = genai.GenerativeModel('gemini-2.5-flash')
                     res = model.generate_content([prompt, plot_scientific_matrix(current_data)])
                     response_text = res.text
                     decision = "GO" if "GO" in res.text.upper() else "NO-GO"
