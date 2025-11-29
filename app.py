@@ -422,7 +422,7 @@ with tab3:
                     # Using standard GenerativeAI Lib but simulating Vertex behavior
                     genai.configure(api_key=api_key)
                     # NOTE: Using 1.5-flash as the stable proxy for the requested 2.5 architecture
-                    model = genai.GenerativeModel('gemini-1.5-flash')
+                    model = genai.GenerativeModel('gemini-2.5-flash')
                     res = model.generate_content([prompt, matrix_img])
                     response_text = res.text
                     decision = "GO" if "GO" in res.text.upper() else "NO-GO"
