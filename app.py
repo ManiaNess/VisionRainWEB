@@ -28,36 +28,78 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# --- AUTHENTICATION DEBUGGER ---
+# --- AUTHENTICATION (Fixed) ---
 GEE_ACTIVE = False
 AUTH_ERROR = "Unknown Error"
-PROJECT_ID = 'ee-karmaakabane701' # Matches your JSON
+PROJECT_ID = 'ee-karmaakabane701'
 
 try:
-    # Check if the secret exists
-    if "earth_engine" not in st.secrets:
-        raise Exception("Secrets file missing [earth_engine] section.")
-    
-    if "service_account" not in st.secrets["earth_engine"]:
-        raise Exception("Secrets missing 'service_account' key inside [earth_engine].")
-
-    # Load the JSON
-    service_account_info = json.loads(st.secrets["earth_engine"]["service_account"])
-    
-    # Create credentials
-    credentials = ee.ServiceAccountCredentials(
-        email=service_account_info['client_email'],
-        key_data=service_account_info['private_key'],
-        project=PROJECT_ID
-    )
-    
-    # Initialize
-    ee.Initialize(credentials=credentials, project=PROJECT_ID)
-    GEE_ACTIVE = True
+    if "earth_engine" in st.secrets:
+        # 1. Load JSON
+        service_account_info = json.loads(st.secrets["earth_engine"]["service_account"])
+        
+        # 2. Create Credentials (REMOVED 'project' ARGUMENT HERE)
+        credentials = ee.ServiceAccountCredentials(
+            email=service_account_info['client_email'],
+            key_data=service_account_info['private_key']
+        )
+        
+        # 3. Initialize (Project ID goes here instead)
+        ee.Initialize(credentials=credentials, project=PROJECT_ID)
+        GEE_ACTIVE = True
+    else:
+        # Local Fallback
+        ee.Initialize(project=PROJECT_ID)
+        GEE_ACTIVE = True
 
 except Exception as e:
     GEE_ACTIVE = False
     AUTH_ERROR = str(e)
+
+# --- DATA ENGINE ---
+def get_data(lat, lon):
+    if not GEE_ACTIVE:
+        return {"temp": 30, "prob": 50, "rad": 10, "phase": 1, "source": "SIMULATION (Auth Failed)"}
+
+    try:
+        point = ee.Geometry.Point([lon, lat])
+        
+        # REAL SATELLITE FETCH
+        era5 = ee.ImageCollection("ECMWF/ERA5_LAND/HOURLY").filterDate('2023-01-01', '2024-01-01').first()
+        modis = ee.ImageCollection("MODIS/006/MOD06_L2").filterDate('2023-01-01', '2024-01-01').first()
+        
+        combined = era5.addBands(modis)
+        val = combined.reduceRegion(ee.Reducer.mean(), point, 5000).getInfo()
+        
+        # Extract
+        temp = (val.get('temperature_2m', 300) - 273.15)
+        rad = val.get('Cloud_Effective_Radius', 0) or 0
+        
+        # Logic
+        prob = 85 if rad > 0 else 10
+        if temp < 0 and temp > -15: prob += 20
+        
+        return {
+            "temp": temp,
+            "prob": min(prob, 100),
+            "rad": rad,
+            "phase": 1 if temp > -10 else 2,
+            "source": "SATELLITE (Active)"
+        }
+    except Exception as e:
+        return {"temp": 0, "prob": 0, "rad": 0, "phase": 0, "source": f"ERROR: {str(e)}"}
+
+# --- TEXTURE GENERATOR ---
+def make_texture(intensity, cmap):
+    np.random.seed(int(intensity*100))
+    data = gaussian_filter(np.random.rand(50,50), sigma=3) * intensity
+    fig, ax = plt.subplots(figsize=(2,1.5))
+    fig.patch.set_facecolor('#0a0a0a')
+    ax.imshow(data, cmap=cmap)
+    ax.axis('off')
+    buf = BytesIO()
+    plt.savefig(buf, format="png", facecolor='#0a0a0a', bbox_inches='tight', pad_inches=0)
+    return Image.open(buf)
 
 # --- UI ---
 st.title("VisionRain | Kingdom Commander")
@@ -66,7 +108,19 @@ if GEE_ACTIVE:
     st.markdown(f'<span class="status-badge badge-ok">✅ ONLINE: {PROJECT_ID}</span>', unsafe_allow_html=True)
 else:
     st.markdown(f'<span class="status-badge badge-err">❌ OFFLINE: {AUTH_ERROR}</span>', unsafe_allow_html=True)
-    st.error(f"🛑 CRITICAL AUTH ERROR: {AUTH_ERROR}")
-    st.info("Check the Streamlit Secrets formatting (Step 3 below).")
 
-# ... (Rest of app logic handles fallback) ...
+col1, col2 = st.columns([2,1])
+
+with col1:
+    m = geemap.Map(center=[24.7, 46.6], zoom=5, basemap="CartoDB.DarkMatter")
+    m.to_streamlit(height=400)
+
+with col2:
+    st.header("Sector Analysis")
+    if st.button("Scan Riyadh"):
+        with st.spinner("Satellite Handshake..."):
+            d = get_data(24.7, 46.6)
+            st.metric("Source", d['source'])
+            st.metric("Temp", f"{d['temp']:.1f}°C")
+            st.metric("Prob", f"{d['prob']:.0f}%")
+            st.image(make_texture(d['prob']/100, "Blues"), caption="Cloud Structure")
