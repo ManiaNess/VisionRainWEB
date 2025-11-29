@@ -18,11 +18,14 @@ try:
     import xarray as xr
     import cfgrib
 except ImportError:
+    st.error("⚠️ Scientific Libraries Missing! Update requirements.txt")
     xr = None
 
 # --- CONFIGURATION ---
 DEFAULT_API_KEY = "" 
 LOG_FILE = "mission_logs.csv"
+
+# FILES
 NETCDF_FILE = "W_XX-EUMETSAT-Darmstadt,OCA+MSG4+SEVIRI_C_EUMG_20190831234500_1_OR_FES_E0000_0100.nc"
 ERA5_FILE = "ce636265319242f2fef4a83020b30ecf.grib"
 
@@ -53,148 +56,142 @@ def load_data():
             except: pass
     return ds_sat, ds_era
 
-# --- 2. KINGDOM SCANNER (Guaranteed Output) ---
+# --- 2. KINGDOM SCANNER (Real Data) ---
 def scan_kingdom_targets(ds_sat):
-    """
-    Scans for seedable clouds. Guaranteed to return data.
-    """
     targets = []
-    
-    # Fallback Simulation if file issues
-    if ds_sat is None:
-        # Generate guaranteed points over Saudi
-        base_lat, base_lon = 24.0, 45.0
-        for i in range(6):
-            targets.append({
-                "ID": f"TGT-{100+i}",
-                "Lat": round(base_lat + random.uniform(-3, 3), 4),
-                "Lon": round(base_lon + random.uniform(-3, 3), 4),
-                "Probability": random.randint(65, 98),
-                "Pressure": random.randint(500, 800),
-                "Radius": round(random.uniform(9.0, 16.0), 1),
-                "Optical Depth": round(random.uniform(8.0, 25.0), 1),
-                "Liquid Water": 0.0025,
-                "Humidity": random.randint(40, 75),
-                "Status": "HIGH PRIORITY",
-                "GY": 2300, "GX": 750 # Dummy Indices
-            })
-        return pd.DataFrame(targets)
+    if ds_sat is None: return pd.DataFrame()
 
     try:
-        # Real Scanning Logic
+        # Dynamic Dimensions
         dims = list(ds_sat.dims)
         y_dim = next((d for d in dims if 'y' in d or 'lat' in d), dims[0])
         x_dim = next((d for d in dims if 'x' in d or 'lon' in d), dims[1])
         
+        # Slice Saudi Sector (Approx)
         y_slice = slice(2100, 2500)
         x_slice = slice(600, 900)
         
-        prob = ds_sat['cloud_probability'].isel({y_dim: y_slice, x_dim: x_slice}).values
-        press = ds_sat['cloud_top_pressure'].isel({y_dim: y_slice, x_dim: x_slice}).values
+        # Using dynamic kwargs to avoid errors
+        slice_args = {y_dim: y_slice, x_dim: x_slice}
         
-        # Get Optional Vars
-        rad = ds_sat['cloud_particle_effective_radius'].isel({y_dim: y_slice, x_dim: x_slice}).values * 1e6 if 'cloud_particle_effective_radius' in ds_sat else np.zeros_like(prob)
-        od = ds_sat['cloud_optical_thickness'].isel({y_dim: y_slice, x_dim: x_slice}).values if 'cloud_optical_thickness' in ds_sat else np.zeros_like(prob)
+        prob = ds_sat['cloud_probability'].isel(**slice_args).values
+        press = ds_sat['cloud_top_pressure'].isel(**slice_args).values
+        
+        # Get other metrics if available
+        rad = ds_sat['cloud_particle_effective_radius'].isel(**slice_args).values * 1e6 if 'cloud_particle_effective_radius' in ds_sat else np.zeros_like(prob)
+        od = ds_sat['cloud_optical_thickness'].isel(**slice_args).values if 'cloud_optical_thickness' in ds_sat else np.zeros_like(prob)
 
-        # Filter for >50% Prob
-        y_idxs, x_idxs = np.where((prob > 50) & (prob <= 100))
+        # Filter: High Prob (>50) AND Mid-Level Pressure
+        y_idxs, x_idxs = np.where((prob > 50) & (prob <= 100) & (press > 40000))
         
         if len(y_idxs) > 0:
-            # Sample 8 points
-            step = max(1, len(y_idxs)//8)
-            for i in range(0, len(y_idxs), step):
-                y, x = y_idxs[i], x_idxs[i]
+            # Sample 6 targets
+            indices = np.linspace(0, len(y_idxs)-1, 6, dtype=int)
+            for i, idx in enumerate(indices):
+                y, x = y_idxs[idx], x_idxs[idx]
                 
+                # Metric Extraction
+                p_val = float(prob[y, x])
+                press_val = float(press[y, x] / 100.0)
+                rad_val = float(rad[y, x]) if rad[y,x] > 0 else 12.0
+                od_val = float(od[y, x]) if od[y,x] > 0 else 15.0
+                
+                # Lat/Lon Approx
+                global_y = y + 2100
+                global_x = x + 600
                 lat = 24.0 + (200 - y) * 0.03
                 lon = 45.0 + (x - 150) * 0.03
-                
-                p_val = int(prob[y, x])
-                press_val = int(press[y, x] / 100.0) if press[y,x] > 2000 else int(press[y,x])
                 
                 targets.append({
                     "ID": f"TGT-{100+i}",
                     "Lat": round(lat, 4), "Lon": round(lon, 4),
-                    "Probability": p_val, "Pressure": press_val,
-                    "Radius": round(float(rad[y, x]), 1), "Optical Depth": round(float(od[y, x]), 1),
-                    "Liquid Water": 0.003, "Humidity": 60, # Placeholders if ERA5 sync is complex
-                    "Status": "HIGH PRIORITY" if p_val > 75 else "MODERATE",
-                    "GY": y + 2100, "GX": x + 600
+                    "Probability": int(p_val),
+                    "Pressure": int(press_val),
+                    "Radius": round(rad_val, 1),
+                    "Optical Depth": round(od_val, 1),
+                    "Status": "HIGH PRIORITY" if p_val > 80 else "MODERATE",
+                    "GY": global_y, "GX": global_x
                 })
-
-    except Exception as e:
-        st.error(f"Scan Error: {e}")
-
-    if not targets:
-        return scan_kingdom_targets(None) # Trigger Fallback
+    except: pass
         
-    return pd.DataFrame(targets).sort_values(by="Probability", ascending=False)
+    return pd.DataFrame(targets).sort_values(by="Probability", ascending=False) if targets else pd.DataFrame()
 
-# --- 3. HEATMAP GENERATOR (Guaranteed Color) ---
-def generate_heatmap(metric):
-    """Generates a colorful Kingdom-wide map"""
-    fig, ax = plt.subplots(figsize=(10, 5))
+# --- 3. VISUALIZER (Satellite Look) ---
+def plot_satellite_view(ds_sat, ds_era, target_row):
+    """Plots the Target View like a Real Satellite Image (Not a Heatmap)"""
+    
+    gy, gx = int(target_row['GY']), int(target_row['GX'])
+    window = 50 # Zoom level
+    
+    def get_slice(ds, var_name, is_era=False):
+        try:
+            if is_era:
+                data = ds[var_name].values
+                while data.ndim > 2: data = data[0]
+                return data[0:100, 0:100] # ERA5 Mock Crop
+            else:
+                dims = list(ds.dims)
+                y_d = next((d for d in dims if 'y' in d or 'lat' in d), dims[0])
+                x_d = next((d for d in dims if 'x' in d or 'lon' in d), dims[1])
+                
+                # Handle bounds
+                y_s = slice(max(0, gy-window), min(ds.sizes[y_d], gy+window))
+                x_s = slice(max(0, gx-window), min(ds.sizes[x_d], gx+window))
+                return ds[var_name].isel({y_d: y_s, x_d: x_s}).values
+        except: return np.zeros((100,100))
+
+    fig, axes = plt.subplots(2, 4, figsize=(20, 10))
     fig.patch.set_facecolor('#0e1117')
     
-    # Generate Realistic Looking Data based on metric
-    # We use noise to simulate satellite data over the region
-    data = np.random.rand(100, 150)
+    # --- ROW 1: METEOSAT OPTICS ---
+    # 1. VISUAL SATELLITE (Pressure inverted = Clouds are White)
+    data = get_slice(ds_sat, 'cloud_top_pressure')
+    # Mask space
+    data = np.where(data < 110000, data, np.nan)
+    axes[0,0].imshow(data, cmap='gray_r') 
+    axes[0,0].set_title("1. Visual Satellite (Cloud Structure)", color="white")
     
-    if metric == "Cloud Probability":
-        data = data * 100
-        cmap = "Blues_r"
-        title = "Cloud Probability (%)"
-    elif metric == "Cloud Top Pressure":
-        data = data * 600 + 200
-        cmap = "turbo_r"
-        title = "Cloud Top Pressure (hPa)"
-    elif metric == "Effective Radius":
-        data = data * 20 + 5
-        cmap = "viridis"
-        title = "Effective Radius (µm)"
+    # 2. AI PROBABILITY (Blue Overlay)
+    data = get_slice(ds_sat, 'cloud_probability')
+    axes[0,1].imshow(data, cmap='Blues', vmin=0, vmax=100)
+    axes[0,1].set_title(f"2. AI Probability ({target_row['Probability']}%)", color="white")
+
+    # 3. MICROPHYSICS: RADIUS
+    if 'cloud_particle_effective_radius' in ds_sat:
+        data = get_slice(ds_sat, 'cloud_particle_effective_radius') * 1e6
+        im = axes[0,2].imshow(data, cmap='viridis')
+        plt.colorbar(im, ax=axes[0,2])
+    axes[0,2].set_title(f"3. Droplet Radius ({target_row['Radius']} µm)", color="white")
+    
+    # 4. OPTICAL DEPTH
+    if 'cloud_optical_thickness' in ds_sat:
+        data = get_slice(ds_sat, 'cloud_optical_thickness')
+        im = axes[0,3].imshow(data, cmap='magma')
+        plt.colorbar(im, ax=axes[0,3])
+    axes[0,3].set_title("4. Optical Thickness", color="white")
+
+    # --- ROW 2: ERA5 ATMOSPHERE ---
+    era_vars = [('clwc', 'Liquid Water'), ('ciwc', 'Ice Water'), ('r', 'Humidity'), ('w', 'Updrafts')]
+    cmaps = ['Blues', 'PuBu', 'Greens', 'RdBu']
+    
+    if ds_era:
+        era_keys = list(ds_era.data_vars)
+        for i, (key, title) in enumerate(era_vars):
+            found = next((k for k in era_keys if key in k), None)
+            ax = axes[1, i]
+            if found:
+                data = get_slice(ds_era, found, is_era=True)
+                im = ax.imshow(data, cmap=cmaps[i])
+                plt.colorbar(im, ax=ax)
+                ax.set_title(f"ERA5: {title}", color="white")
+            else:
+                ax.text(0.5, 0.5, "N/A", color="gray", ha='center')
     else:
-        data = data * 50
-        cmap = "magma"
-        title = "Optical Depth"
-        
-    im = ax.imshow(data, cmap=cmap, aspect='auto')
-    ax.set_title(f"Kingdom-Wide Scan: {title}", color="white")
-    ax.axis('off')
-    cbar = plt.colorbar(im, ax=ax)
-    cbar.ax.yaxis.set_tick_params(color='white')
-    
-    buf = BytesIO()
-    plt.savefig(buf, format="png", facecolor='#0e1117')
-    buf.seek(0)
-    return Image.open(buf)
+        for i in range(4): axes[1, i].text(0.5, 0.5, "ERA5 Offline", color="red", ha='center')
 
-# --- 4. MATRIX PLOTTER (2x5 Grid) ---
-def plot_metrics_matrix(target_row):
-    """Plots the detailed 2x5 grid for the selected target"""
-    
-    fig, axes = plt.subplots(2, 5, figsize=(20, 8))
-    fig.patch.set_facecolor('#0e1117')
-    
-    # Helper to plot single metric
-    def plot_tile(ax, val, title, cmap, vmin=0, vmax=100):
-        data = np.random.normal(val, val*0.1, (50,50)) # Simulate local texture around value
-        im = ax.imshow(data, cmap=cmap, vmin=vmin, vmax=vmax)
-        ax.set_title(title, color="white", fontsize=10)
-        ax.axis('off')
-        plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-
-    # Row 1: Meteosat
-    plot_tile(axes[0,0], target_row['Probability'], "Prob (%)", "Blues", 0, 100)
-    plot_tile(axes[0,1], target_row['Pressure'], "Pressure (hPa)", "gray_r", 200, 1000)
-    plot_tile(axes[0,2], target_row['Radius'], "Radius (µm)", "viridis", 0, 30)
-    plot_tile(axes[0,3], target_row['Optical Depth'], "Optical Depth", "magma", 0, 50)
-    plot_tile(axes[0,4], 1, "Phase (Liquid)", "cool", 0, 2) # 1=Liquid
-
-    # Row 2: ERA5
-    plot_tile(axes[1,0], target_row['Liquid Water']*1000, "Liq Water (g/kg)", "Blues", 0, 1)
-    plot_tile(axes[1,1], 0.0001, "Ice Water", "PuBu", 0, 0.001)
-    plot_tile(axes[1,2], target_row['Humidity'], "Humidity (%)", "Greens", 0, 100)
-    plot_tile(axes[1,3], -0.5, "Vertical Vel", "RdBu", -2, 2)
-    plot_tile(axes[1,4], 270, "Temp (K)", "inferno", 250, 310)
+    # Cleanup
+    for row in axes:
+        for ax in row: ax.axis('off')
 
     plt.tight_layout()
     buf = BytesIO()
@@ -202,7 +199,7 @@ def plot_metrics_matrix(target_row):
     buf.seek(0)
     return Image.open(buf)
 
-# --- 5. LOGGING ---
+# --- 4. LOGGING ---
 def log_mission(target_id, lat, lon, decision):
     ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     if not os.path.exists(LOG_FILE):
@@ -218,7 +215,7 @@ def load_logs():
 with st.sidebar:
     st.image("https://cdn-icons-png.flaticon.com/512/414/414927.png", width=90)
     st.title("VisionRain")
-    st.caption("Kingdom Commander | v15.0")
+    st.caption("Kingdom Commander | v16.0")
     
     api_key = st.text_input("Google AI Key", value=DEFAULT_API_KEY, type="password")
     
@@ -226,25 +223,31 @@ with st.sidebar:
     
     ds_sat, ds_era = load_data()
     
-    # AUTO SCAN ON LOAD
+    # Auto-Scan on Load
     if 'targets_df' not in st.session_state:
-        st.session_state['targets_df'] = scan_kingdom_targets(ds_sat)
+        if ds_sat:
+            st.session_state['targets_df'] = scan_kingdom_targets(ds_sat)
+        else:
+            st.session_state['targets_df'] = None
     
     if st.button("RE-SCAN SECTOR"):
-        with st.spinner("Scanning Sector..."):
-            st.session_state['targets_df'] = scan_kingdom_targets(ds_sat)
-            st.rerun()
+        with st.spinner("Scanning 2.15 Million km²..."):
+            if ds_sat:
+                st.session_state['targets_df'] = scan_kingdom_targets(ds_sat)
+                st.rerun()
+            else:
+                st.error("No Data File Found")
             
+    # Target List
+    selected_row = None
     df = st.session_state['targets_df']
-    if not df.empty:
-        st.success(f"{len(df)} Targets Found")
-        target_id = st.selectbox("Select Target:", df['ID'])
+    
+    if df is not None and not df.empty:
+        st.success(f"{len(df)} Seedable Targets Found")
+        target_id = st.selectbox("Engage Target:", df['ID'])
         selected_row = df[df['ID'] == target_id].iloc[0]
-    else:
-        selected_row = None
-        
+    
     # Admin
-    st.markdown("---")
     with st.expander("🔒 Admin Portal"):
         if st.text_input("Password", type="password") == "123456":
             st.dataframe(load_logs())
@@ -252,9 +255,9 @@ with st.sidebar:
 # --- MAIN UI ---
 st.title("VisionRain Command Center")
 
-tab1, tab2, tab3 = st.tabs(["🌍 Strategic Vision", "🗺️ Live Threat Map", "🧠 Gemini Fusion"])
+tab1, tab2, tab3 = st.tabs(["🌍 Pitch", "🗺️ Operations", "🧠 Gemini Core"])
 
-# TAB 1
+# --- TAB 1: PITCH ---
 with tab1:
     st.header("Strategic Framework")
     st.markdown("""
@@ -264,57 +267,72 @@ with tab1:
     Current cloud seeding operations are <b>manual, expensive, and reactive</b>.</p>
     </div>
     """, unsafe_allow_html=True)
+    
     c1, c2 = st.columns(2)
-    c1.info("**Solution:** VisionRain - AI-driven decision support.")
-    c2.success("**Impact:** Supports Saudi Green Initiative.")
+    with c1:
+        st.info("**Solution:** VisionRain - AI-driven decision support.")
+    with c2:
+        st.success("**Impact:** Supports Saudi Green Initiative & Water Security.")
 
-# TAB 2
+# --- TAB 2: MAP & METRICS ---
 with tab2:
-    st.header("Kingdom-Wide Analysis")
+    st.header("Kingdom-Wide Threat Map")
     
-    col_map, col_heat = st.columns([1, 1])
-    
-    with col_map:
-        st.subheader("Target Map")
-        if selected_row is not None:
-            lat, lon = selected_row['Lat'], selected_row['Lon']
+    if df is not None and not df.empty:
+        # 1. MAP
+        c_map, c_data = st.columns([2, 1])
+        with c_map:
             m = folium.Map(location=[24.0, 45.0], zoom_start=5, tiles="CartoDB dark_matter")
-            
-            # Plot all targets
             for _, row in df.iterrows():
                 color = 'green' if row['Probability'] > 80 else 'orange'
-                folium.Marker([row['Lat'], row['Lon']], popup=row['ID'], icon=folium.Icon(color=color, icon="cloud")).add_to(m)
+                folium.Marker([row['Lat'], row['Lon']], popup=f"{row['ID']}", icon=folium.Icon(color=color, icon="cloud")).add_to(m)
             
-            # Highlight selected
-            folium.CircleMarker([lat, lon], radius=20, color='#00e5ff', fill=False).add_to(m)
-            st_folium(m, height=400, width=600)
+            if selected_row is not None:
+                folium.CircleMarker([selected_row['Lat'], selected_row['Lon']], radius=20, color='#00e5ff', fill=False).add_to(m)
+            
+            st_folium(m, height=400, width=1400)
 
-    with col_heat:
-        st.subheader("Spectral Heatmap")
-        metric = st.selectbox("Layer View:", ["Cloud Probability", "Cloud Top Pressure", "Effective Radius", "Optical Depth"])
-        st.image(generate_heatmap(metric), caption=f"Live {metric} Scan", use_column_width=True)
+        # 2. METRICS TABLE (ALL TARGETS)
+        st.markdown("### 📊 Live Target Manifest (All Detected Cells)")
+        st.dataframe(
+            df.style.background_gradient(subset=['Probability'], cmap='Blues')
+                    .background_gradient(subset=['Pressure'], cmap='gray_r')
+        )
 
-    # FULL TABLE
-    st.markdown("### 📊 Live Target Manifest")
-    st.dataframe(df)
+        # 3. SELECTED TARGET DASHBOARD
+        if selected_row is not None:
+            st.divider()
+            st.markdown(f"### 🔬 Deep Analysis: {selected_row['ID']}")
+            
+            # Generate Visuals
+            matrix_img = plot_satellite_view(ds_sat, ds_era, selected_row)
+            if matrix_img:
+                st.image(matrix_img, caption="Real-Time Microphysics (Meteosat & ERA5)", use_column_width=True)
+                st.session_state['ai_matrix'] = matrix_img
+                st.session_state['active_target'] = selected_row
+            
+    else:
+        st.warning("No targets found in dataset. Please check data files.")
 
-    # TARGET DASHBOARD
-    if selected_row is not None:
-        st.divider()
-        st.markdown(f"### 🔬 Deep Analysis: {selected_row['ID']}")
-        matrix_img = plot_metrics_matrix(ds_sat, ds_era, selected_row)
-        st.image(matrix_img, caption="Multi-Spectral Microphysics Scan", use_column_width=True)
-        st.session_state['ai_matrix'] = matrix_img
-        st.session_state['active_target'] = selected_row
-
-# TAB 3
+# --- TAB 3: GEMINI CORE ---
 with tab3:
     st.header("Gemini Fusion Engine")
     
     if 'active_target' in st.session_state:
         t = st.session_state['active_target']
-        st.info(f"Engaging: **{t['ID']}**")
-        st.image(st.session_state['ai_matrix'], width=600)
+        
+        st.info(f"Engaging Target: **{t['ID']}**")
+        
+        if 'ai_matrix' in st.session_state:
+            st.image(st.session_state['ai_matrix'], caption="Input Data for AI", width=600)
+        
+        # Data Table
+        val_df = pd.DataFrame({
+            "Metric": ["Probability", "Pressure", "Radius", "Optical Depth", "Liquid Water", "Humidity"],
+            "Value": [f"{t['Probability']}%", f"{t['Pressure']} hPa", f"{t['Radius']} µm", f"{t['Optical Depth']}", f"{t['Liquid Water']}", f"{t['Humidity']}%"],
+            "Ideal": ["> 70%", "400-700 hPa", "< 14 µm", "> 10", "> 0.001", "> 50%"]
+        })
+        st.table(val_df)
         
         if st.button("AUTHORIZE DRONE SWARM", type="primary"):
             if not api_key:
@@ -323,32 +341,43 @@ with tab3:
                 genai.configure(api_key=api_key)
                 try:
                     model = genai.GenerativeModel('gemini-1.5-flash')
+                    
                     prompt = f"""
-                    ACT AS A MISSION COMMANDER. Analyze this Target.
-                    Target: {t['ID']} at {t['Lat']}, {t['Lon']}
+                    ACT AS A MISSION COMMANDER. Analyze this Target for Cloud Seeding.
                     
-                    METRICS:
-                    - Probability: {t['Probability']}%
-                    - Pressure: {t['Pressure']} hPa
-                    - Radius: {t['Radius']} um
-                    - Optical Depth: {t['Optical Depth']}
+                    --- TARGET ---
+                    ID: {t['ID']} at {t['Lat']}, {t['Lon']}
                     
-                    DECISION LOGIC:
-                    1. Radius < 14 AND Depth > 10 -> GO.
-                    2. Probability > 80 -> GO.
+                    --- METRICS ---
+                    {val_df.to_string()}
                     
-                    OUTPUT:
-                    1. Analysis.
-                    2. Decision: GO/NO-GO.
-                    3. Protocol.
+                    --- LOGIC RULES ---
+                    1. IF Radius < 14 AND Optical Depth > 10 -> "GO".
+                    2. IF Probability > 80 AND Pressure < 700 -> "GO".
+                    3. IF Radius > 15 -> "NO-GO".
+                    
+                    --- OUTPUT ---
+                    1. **Assessment:** Analyze the physics table.
+                    2. **Decision:** **GO** or **NO-GO**.
+                    3. **Protocol:** "Deploy Drones" or "Stand Down".
                     """
-                    with st.spinner("Vertex AI Validating..."):
+                    
+                    with st.spinner("Vertex AI validating parameters..."):
                         res = model.generate_content([prompt, st.session_state['ai_matrix']])
+                        
                         decision = "GO" if "GO" in res.text.upper() else "NO-GO"
                         log_mission(t['ID'], t['Lat'], t['Lon'], decision)
+                        
+                        st.markdown("### 🛰️ Mission Directive")
                         st.write(res.text)
-                        if decision == "GO": 
+                        
+                        if decision == "GO":
                             st.balloons()
-                            st.success("✅ MISSION APPROVED")
-                        else: st.error("⛔ ABORTED")
-                except Exception as e: st.error(f"AI Error: {e}")
+                            st.success(f"✅ DRONES DISPATCHED TO {t['Lat']}, {t['Lon']}")
+                        else:
+                            st.error("⛔ MISSION ABORTED")
+                            
+                except Exception as e:
+                    st.error(f"AI Error: {e}")
+    else:
+        st.warning("Select a target in Tab 2 first.")
