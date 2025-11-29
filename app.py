@@ -293,4 +293,14 @@ def plot_scientific_matrix(data_points, region_name):
         {"ax": axes[0,3], "title": "Optical Depth", "cmap": "magma", "data": generate_cloud_texture_from_gee(region_name, 'opt', data_points['opt']), "vmax": 50},
         {"ax": axes[0,4], "title": "Phase (0=Clr,1=Liq,2=Ice)", "cmap": "cool", "data": generate_cloud_texture_from_gee(region_name, 'phase', data_points['phase']), "vmax": 2},
         {"ax": axes[1,0], "title": "Liquid Water (kg/m³)", "cmap": "Blues", "data": generate_cloud_texture_from_gee(region_name, 'lwc', data_points['lwc']), "vmax": 0.01},
-        {"ax": axes[1,1], "title": "Ice Water Content", "cmap": "PuBu",
+        {"ax": axes[1,1], "title": "Ice Water Content", "cmap": "PuBu", "data": generate_cloud_texture_from_gee(region_name, 'iwc', data_points['iwc']), "vmax": 0.01},
+        {"ax": axes[1,2], "title": "Rel. Humidity (%)", "cmap": "Greens", "data": generate_cloud_texture_from_gee(region_name, 'rh', data_points['rh']), "vmax": 100},
+        {"ax": axes[1,3], "title": "Vertical Velocity (m/s)", "cmap": "RdBu_r", "data": generate_cloud_texture_from_gee(region_name, 'w', data_points['w']), "vmax": 5},
+        {"ax": axes[1,4], "title": "Temperature (°C)", "cmap": "inferno", "data": generate_cloud_texture_from_gee(region_name, 'temp', data_points['temp']), "vmax": 40},
+    ]
+    
+    for p in plots:
+        ax = p['ax']
+        ax.set_facecolor('#0e1117')
+        im = ax.imshow(p['data'], cmap=p['cmap'], aspect='auto')
+        ax.set_title(p['title'], color="white", fontsize=9, fontweight='bold')
