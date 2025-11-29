@@ -58,60 +58,54 @@ except Exception as e:
     GEE_ACTIVE = False
     AUTH_ERROR = str(e)
 
-# --- DATA ENGINE (Unified ERA5 Data Source) ---
+# --- DATA ENGINE (Stable GEE Band Mapping) ---
 @st.cache_data(ttl=600)
 def get_data(lat, lon):
+    # This is the fail-safe return when GEE is offline or crashes
     if not GEE_ACTIVE:
-        # Fallback must exist for error state
-        return {"Temp": 30, "Pressure": 750, "Radius": 10, "OptDepth": 15, "Phase": 1, "LiquidWater": 0.005, "IceWater": 0.001, "Humidity": 70, "VertVel": 2.0, "Source": "SIMULATION (Offline)"}
+        return {"Temp": 30, "Pressure": 750, "Radius": 10, "OptDepth": 15, "Phase": 1, "LiquidWater": 0.005, "IceWater": 0.001, "Humidity": 70, "VertVel": 2.0, "Source": "SIMULATION (Auth Failed)"}
 
     try:
         point = ee.Geometry.Point([lon, lat])
         
-        # ERA5 Full (Atmospheric Variables + Pressure Levels)
+        # 1. ERA5 Full (Atmospheric Variables) - STABLE
         era5 = ee.ImageCollection("ECMWF/ERA5/HOURLY").filterDate('2024-01-01', '2024-01-31').first() 
-        # MODIS (Cloud Microphysics)
-        modis = ee.ImageCollection("MODIS/006/MOD06_L2").filterDate('2024-01-01', '2024-01-31').first()
+        
+        # 2. MODIS Collection 6.1 (Cloud Microphysics) - NEW STABLE ASSET
+        modis = ee.ImageCollection("MODIS/061/MOD06_L2").filterDate('2024-01-01', '2024-01-31').first()
         
         # Select Bands (Fixed names)
-        era5_bands = era5.select('temperature_2m', 'dewpoint_temperature_2m', 'vertical_velocity_850hPa', 'total_cloud_cover')
-        modis_bands = modis.select('Cloud_Effective_Radius', 'Cloud_Top_Pressure', 'Cloud_Optical_Thickness', 'Cloud_Phase_Optical')
+        era5_bands = era5.select('temperature_2m', 'relative_humidity_850hPa', 'vertical_velocity_850hPa')
+        modis_bands = modis.select('Cloud_Effective_Radius', 'Cloud_Top_Pressure', 'Cloud_Optical_Thickness')
 
         combined = era5_bands.addBands(modis_bands)
         val = combined.reduceRegion(ee.Reducer.mean(), point, 5000).getInfo()
         
-        # --- EXTRACTING REAL GEE DATA (ERA5 Bands) ---
+        # --- EXTRACTING REAL GEE DATA ---
         temp = (val.get('temperature_2m', 300) - 273.15)
-        dewpoint_temp = val.get('dewpoint_temperature_2m', 290)
-        
-        # Calculate Relative Humidity from Temp and Dewpoint Temp (GEE Standard)
-        # RH = 100 * exp(17.625 * Td / (243.04 + Td)) / exp(17.625 * T / (243.04 + T))
-        RH = 100 * (val.get('relative_humidity_850hPa', 50) or 50) 
-        
         rad = val.get('Cloud_Effective_Radius', 0) or 0
         pressure = val.get('Cloud_Top_Pressure', 700) or 700
         opt_depth = val.get('Cloud_Optical_Thickness', 10) or 10
         vert_vel = val.get('vertical_velocity_850hPa', 0) or 0
-        phase_raw = val.get('Cloud_Phase_Optical', 1) or 1 
-        total_cloud_cover = val.get('total_cloud_cover', 0.5) or 0.5
+        humidity = val.get('relative_humidity_850hPa', 50) or 50 # % at 850hPa
 
-        # --- DERIVED LOGIC (Physically based on GEE Data) ---
-        cloud_water_path = (rad * opt_depth * total_cloud_cover) if rad > 0 else 0 
+        # --- DERIVED LOGIC (Based on Real Data) ---
+        cloud_water_path = (rad * opt_depth * 0.001) if rad > 0 else 0 
         
         return {
             "Temp": temp,
             "Pressure": pressure,
             "Radius": rad,
             "OptDepth": opt_depth,
-            "Phase": 1 if phase_raw < 5 else 2, 
+            "Phase": 1 if temp > -10 else 2, # Proxy using Temp
             "LiquidWater": cloud_water_path * 0.75, 
             "IceWater": cloud_water_path * 0.25,
-            "Humidity": RH,
+            "Humidity": humidity,
             "VertVel": vert_vel * -100,
-            "Source": "ERA5 Unified (Active)"
+            "Source": "ERA5/MODIS 6.1 (Active)"
         }
     except Exception as e:
-        # Fallback if band mapping fails after successful auth
+        # Returns specific GEE error message to the dashboard
         return {"Temp": 0, "Pressure": 0, "Radius": 0, "OptDepth": 0, "Phase": 0, "LiquidWater": 0, "IceWater": 0, "Humidity": 0, "VertVel": 0, "Source": f"RUNTIME ERROR: {str(e)}"}
 
 # --- VISUALIZATION ENGINE (Numerical 2x5 Matrix Display) ---
@@ -132,7 +126,6 @@ def plot_scientific_matrix(data_points):
         {"title": "Temperature (°C)", "value_key": "Temp", "unit": " °C"},
     ]
     
-    # Calculate Probability
     data_points["Prob"] = 100 if data_points["Radius"] > 5 and data_points["Phase"] == 1 else 10
 
     cols = st.columns(5)
@@ -141,14 +134,11 @@ def plot_scientific_matrix(data_points):
         col = cols[i % 5]
         value = data_points.get(p["value_key"], 0)
         
-        # Use simple Metric cards for visualization (replacing the simulated image texture)
         col.metric(
             label=p["title"],
             value=f"{value:.2f}{p['unit']}",
             delta="SEEDABLE" if p["value_key"] == "Radius" and value > 5 and value < 14 else None
         )
-
-    # Return None as we used Metric for direct display
     return None 
 # -----------------------------------------------
 
@@ -208,7 +198,6 @@ with tab2:
     st.markdown("---")
     
     st.subheader("🔬 Microphysics Matrix (10 Real GEE Metrics)")
-    # Replaced simulated image with numerical metrics display
     plot_scientific_matrix(region_data) 
     
     st.markdown("---")
