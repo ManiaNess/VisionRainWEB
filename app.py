@@ -106,24 +106,26 @@ def save_mission_log(region, stats, decision, reasoning):
     bq_client.insert_rows("visionrain_logs", "mission_audit", [entry])
 def get_mission_logs(): return pd.DataFrame(st.session_state.firestore_db)
 
-# --- SCIENTIFIC DATA ENGINE (HIGH-RES DIGITAL GRID) ---
+# --- SCIENTIFIC DATA ENGINE (RAW PIXEL SIMULATION) ---
 
-def generate_digital_grid(shape=(150, 150), seed=42, intensity=1.0):
+def generate_pixel_grid(shape=(320, 320), seed=42, intensity=1.0):
     """
-    Generates a 150x150 HD Digital Grid.
-    Uses nearest-neighbor interpolation in display to look like raw sensor pixels.
+    Generates a 320x320 Pixel Grid (480p aesthetic).
+    We generate noise, smooth it slightly for structure, then quantization happens 
+    in the plotting phase via 'nearest' interpolation.
     """
     np.random.seed(seed)
     
-    # 1. Base Physics (Perlin-like structure)
+    # 1. Base Physics
     noise = np.random.rand(*shape)
-    structure = gaussian_filter(noise, sigma=10.0)
+    # Less smoothing = more "raw" detail
+    structure = gaussian_filter(noise, sigma=5.0)
     
     # 2. Normalize
     norm = (structure - structure.min()) / (structure.max() - structure.min())
     
-    # 3. Add "Sensor Noise" (Grain) for realism
-    sensor_grain = np.random.normal(0, 0.02, shape)
+    # 3. Add High-Freq Sensor Noise
+    sensor_grain = np.random.normal(0, 0.05, shape)
     final = np.clip(norm + sensor_grain, 0, 1)
     
     return final * intensity
@@ -173,7 +175,7 @@ def run_kingdom_wide_scan():
         results[sector] = get_simulated_data(sector)
     return results
 
-# --- VISUALIZATION ENGINE (HD PIXELS) ---
+# --- VISUALIZATION ENGINE (480p PIXELS) ---
 def plot_scientific_matrix(data_points):
     """
     Generates the Matrix with 'nearest' interpolation for RAW PIXEL look.
@@ -181,13 +183,13 @@ def plot_scientific_matrix(data_points):
     fig, axes = plt.subplots(2, 5, figsize=(20, 7))
     fig.patch.set_facecolor('#0e1117')
     
-    # 1. Master Sensor Grid (150x150)
+    # 1. Master Sensor Grid (320x320 = 480p-ish detail)
     seed = int(data_points['prob'] * 100)
-    master_grid = generate_digital_grid(shape=(150, 150), seed=seed) 
+    master_grid = generate_pixel_grid(shape=(320, 320), seed=seed) 
     
     # 2. Physics Mapping
-    rad_grid = master_grid * data_points['rad'] if data_points['rad'] > 0 else np.zeros((150,150))
-    phase_grid = master_grid * data_points['phase'] if data_points['phase'] > 0 else np.zeros((150,150))
+    rad_grid = master_grid * data_points['rad'] if data_points['rad'] > 0 else np.zeros((320,320))
+    phase_grid = master_grid * data_points['phase'] if data_points['phase'] > 0 else np.zeros((320,320))
     
     vis_prob = master_grid * data_points['prob']
     vis_press = (1.0 - master_grid) * 1000 
@@ -211,7 +213,7 @@ def plot_scientific_matrix(data_points):
     for p in plots:
         ax = p['ax']
         ax.set_facecolor('#0e1117')
-        # 'nearest' = Pixelated Look
+        # 'nearest' = Pixelated Look (The 480p raw sensor aesthetic)
         im = ax.imshow(p['data'], cmap=p['cmap'], aspect='auto', interpolation='nearest')
         ax.set_title(p['title'], color="white", fontsize=9, fontweight='bold')
         ax.axis('off')
@@ -242,7 +244,7 @@ if 'all_sector_data' not in st.session_state:
 with st.sidebar:
     st.image("https://cdn-icons-png.flaticon.com/512/414/414927.png", width=80)
     st.title("VisionRain")
-    st.caption("Kingdom Commander | v45.2 (High-Res)")
+    st.caption("Kingdom Commander | v50.0 (480p Raw)")
     
     st.markdown("### ☁️ Infrastructure")
     st.markdown('<div class="cloud-badge"><span class="status-ok">●</span> Cloud Run</div>', unsafe_allow_html=True)
@@ -390,7 +392,7 @@ with tab3:
             st.markdown("### 🚁 Drone Command")
             lat, lon = SAUDI_SECTORS[current_region]['coords']
             # GOOGLE MAPS LINK
-            st.link_button("🗺️ CONFIRM & LAUNCH (OPEN MAPS)", f"https://www.google.com/maps/search/?api=1&query={lat},{lon}")
+            st.link_button("🛰️ CONFIRM & LAUNCH DRONE", f"https://www.google.com/maps/search/?api=1&query={lat},{lon}")
             
         else:
             st.markdown(f'<div class="analysis-text analysis-nogo">⛔ <b>MISSION ABORTED</b><br><br>{response_text}</div>', unsafe_allow_html=True)
