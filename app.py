@@ -11,6 +11,7 @@ import random
 from io import BytesIO
 from scipy.ndimage import gaussian_filter
 import json
+import os
 
 # --- PAGE CONFIG ---
 st.set_page_config(page_title="VisionRain | Kingdom Commander", layout="wide", page_icon="⛈️")
@@ -27,20 +28,26 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# --- AUTHENTICATION (The Critical Part) ---
-# This connects using the Secret you just saved on Streamlit Cloud
+# --- AUTHENTICATION (Service Account Method) ---
 GEE_ACTIVE = False
-PROJECT_ID = 'ee-karmaakabane701'
+PROJECT_ID = 'oceanic-craft-479120-c3'
 
 try:
     if "earth_engine" in st.secrets:
-        # Load credentials from the Secret
-        creds_json = json.loads(st.secrets["earth_engine"]["credentials"])
-        credentials = ee.Credentials(None, creds_json['refresh_token'])
+        # Load the Service Account JSON from Secrets
+        service_account_info = json.loads(st.secrets["earth_engine"]["service_account"])
+        
+        # Authenticate using the Service Account Credentials
+        credentials = ee.ServiceAccountCredentials(
+            email=service_account_info['client_email'],
+            key_data=service_account_info['private_key'],
+            project=PROJECT_ID
+        )
         ee.Initialize(credentials=credentials, project=PROJECT_ID)
         GEE_ACTIVE = True
     else:
-        # Fallback for local testing (if you ever fix your terminal)
+        # Fallback for local testing (if you have the file locally)
+        # You can set GOOGLE_APPLICATION_CREDENTIALS env var locally
         ee.Initialize(project=PROJECT_ID)
         GEE_ACTIVE = True
 except Exception as e:
@@ -50,33 +57,41 @@ except Exception as e:
 # --- DATA ENGINE ---
 def get_data(lat, lon):
     if not GEE_ACTIVE:
-        # Simulation Fallback if Auth fails
+        # Simulation Fallback
         return {"temp": 30, "prob": 50, "rad": 10, "phase": 1, "source": "SIMULATION (Auth Failed)"}
 
     try:
         point = ee.Geometry.Point([lon, lat])
-        # REAL DATA FETCH
+        
+        # REAL SATELLITE FETCH
+        # ERA5: Temperature
         era5 = ee.ImageCollection("ECMWF/ERA5_LAND/HOURLY").filterDate('2023-01-01', '2024-01-01').first()
+        # MODIS: Cloud Physics
         modis = ee.ImageCollection("MODIS/006/MOD06_L2").filterDate('2023-01-01', '2024-01-01').first()
         
         combined = era5.addBands(modis)
+        # Reduce region to get numbers
         val = combined.reduceRegion(ee.Reducer.mean(), point, 5000).getInfo()
         
+        # Parse Results
         temp = (val.get('temperature_2m', 300) - 273.15)
         rad = val.get('Cloud_Effective_Radius', 0) or 0
+        
+        # Physics Logic
         prob = 85 if rad > 0 else 10
+        if temp < 0 and temp > -15: prob += 20
         
         return {
             "temp": temp,
-            "prob": prob,
+            "prob": min(prob, 100),
             "rad": rad,
             "phase": 1 if temp > -10 else 2,
             "source": "SATELLITE (Active)"
         }
-    except:
-        return {"temp": 0, "prob": 0, "rad": 0, "phase": 0, "source": "CONNECTION ERROR"}
+    except Exception as e:
+        return {"temp": 0, "prob": 0, "rad": 0, "phase": 0, "source": f"ERROR: {str(e)}"}
 
-# --- TEXTURES ---
+# --- TEXTURE GENERATOR ---
 def make_texture(intensity, cmap):
     np.random.seed(int(intensity*100))
     data = gaussian_filter(np.random.rand(50,50), sigma=3) * intensity
@@ -90,12 +105,11 @@ def make_texture(intensity, cmap):
 
 # --- UI ---
 st.title("VisionRain | Kingdom Commander")
-st.caption(f"Project ID: {PROJECT_ID}")
 
 if GEE_ACTIVE:
-    st.markdown('<span class="status-badge badge-ok">ONLINE</span>', unsafe_allow_html=True)
+    st.markdown(f'<span class="status-badge badge-ok">✅ GEE CONNECTED: {PROJECT_ID}</span>', unsafe_allow_html=True)
 else:
-    st.markdown('<span class="status-badge badge-err">OFFLINE (Check Secrets)</span>', unsafe_allow_html=True)
+    st.markdown('<span class="status-badge badge-err">⚠️ OFFLINE (Check Secrets)</span>', unsafe_allow_html=True)
 
 col1, col2 = st.columns([2,1])
 with col1:
@@ -103,8 +117,10 @@ with col1:
     m.to_streamlit(height=400)
 
 with col2:
-    if st.button("Scan Riyadh"):
-        d = get_data(24.7, 46.6)
-        st.metric("Temp", f"{d['temp']:.1f}°C")
-        st.metric("Prob", f"{d['prob']}%")
-        st.image(make_texture(d['prob']/100, "Blues"), caption="Cloud Probability")
+    if st.button("Scan Riyadh (Real Data)"):
+        with st.spinner("Satellite Handshake..."):
+            d = get_data(24.7, 46.6)
+            st.metric("Source", d['source'])
+            st.metric("Temp", f"{d['temp']:.1f}°C")
+            st.metric("Prob", f"{d['prob']:.0f}%")
+            st.image(make_texture(d['prob']/100, "Blues"), caption="Cloud Structure")
