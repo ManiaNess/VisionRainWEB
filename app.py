@@ -12,15 +12,6 @@ from io import BytesIO
 import folium
 from streamlit_folium import st_folium
 from scipy.ndimage import gaussian_filter
-
-# --- FIREBASE / FIRESTORE IMPORTS (SAFE MODE) ---
-try:
-    import firebase_admin
-    from firebase_admin import credentials, firestore, initialize_app
-    FIREBASE_AVAILABLE = True
-except ImportError:
-    FIREBASE_AVAILABLE = False
-    
 import json
 
 # --- CONFIGURATION ---
@@ -78,44 +69,22 @@ SAUDI_SECTORS = {
 }
 
 # --- GOOGLE CLOUD ARCHITECTURE SIMULATION ---
-# In a real deployment, these would connect to actual GCP SDKs
-
 class BigQueryClient:
-    """Simulates pushing logs to Google BigQuery."""
     def insert_rows(self, dataset, table, rows):
-        # Simulation delay
         time.sleep(0.1) 
-        # In production: bq_client.insert_rows_json(table_id, rows)
         return True
 
 class CloudStorageClient:
-    """Simulates fetching NetCDF files from GCS Buckets."""
     def fetch_satellite_data(self, region):
-        # Simulation delay
         time.sleep(0.2)
         return True
 
 bq_client = BigQueryClient()
 gcs_client = CloudStorageClient()
 
-# --- FIRESTORE SETUP ---
+# --- FIRESTORE SETUP (Using session state as proxy) ---
 if "firestore_db" not in st.session_state:
     st.session_state.firestore_db = []
-
-def init_firebase():
-    """Attempts to initialize Firebase, returns DB or None."""
-    if not FIREBASE_AVAILABLE: return None
-    try:
-        if not firebase_admin._apps:
-            if "firebase" in st.secrets:
-                cred = credentials.Certificate(dict(st.secrets["firebase"]))
-                initialize_app(cred)
-            else:
-                return None
-        return firestore.client()
-    except Exception: return None
-
-db = init_firebase()
 
 def save_mission_log(region, stats, decision, reasoning):
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -127,39 +96,16 @@ def save_mission_log(region, stats, decision, reasoning):
         "reasoning": reasoning,
         "engine": "VertexAI/Gemini-2.5-Flash"
     }
-    
-    # 1. Local/Session Storage
     st.session_state.firestore_db.append(entry)
-    
-    # 2. Firebase Storage (Real Persistence if keys exist)
-    if db:
-        try: db.collection("mission_logs").add(entry)
-        except: pass
-        
-    # 3. BigQuery Simulation (The "Black Box" Audit Log)
     bq_client.insert_rows("visionrain_logs", "mission_audit", [entry])
 
 def get_mission_logs():
     return pd.DataFrame(st.session_state.firestore_db)
 
-# --- SCIENTIFIC DATA ENGINE ---
-
-def generate_cloud_texture(shape=(100, 100), seed=42, intensity=1.0, roughness=5.0):
-    """
-    Generates REALISTIC cloud-like textures using Gaussian smoothing on noise.
-    Prevents the 'bursting' look by creating smooth gradients.
-    """
-    np.random.seed(seed)
-    noise = np.random.rand(*shape)
-    smooth = gaussian_filter(noise, sigma=roughness)
-    smooth = (smooth - smooth.min()) / (smooth.max() - smooth.min())
-    return smooth * intensity
-
+# --- SCIENTIFIC DATA ENGINE (Simulation) ---
 def scan_single_sector(sector_name):
-    """Generates data for ONE sector based on its climate profile."""
     profile = SAUDI_SECTORS[sector_name]
     
-    # Base Conditions (Physics Templates)
     conditions = [
         # Ideal Storm
         {"prob": 85.0, "press": 650, "rad": 12.5, "opt": 15.0, "lwc": 0.005, "rh": 80, "temp": -8.0, "w": 2.5, "phase": 1}, 
@@ -190,7 +136,6 @@ def scan_single_sector(sector_name):
 
 def run_kingdom_wide_scan():
     """Scans ALL sectors and returns a DataFrame of results."""
-    # Simulate GCS Fetch Latency
     with st.spinner("Fetching NetCDF Packets from Cloud Storage..."):
         gcs_client.fetch_satellite_data("all")
         
@@ -198,44 +143,6 @@ def run_kingdom_wide_scan():
     for sector in SAUDI_SECTORS:
         results[sector] = scan_single_sector(sector)
     return results
-
-# --- VISUALIZATION ENGINE (2x5 Matrix) ---
-def plot_scientific_matrix(data_points):
-    """Generates the 2x5 Matrix of Scientific Plots with REALISTIC TEXTURES."""
-    fig, axes = plt.subplots(2, 5, figsize=(20, 7))
-    fig.patch.set_facecolor('#0e1117')
-    
-    seed = int(data_points['prob'] * 100)
-    
-    #plots = [
-        # ROW 1: SATELLITE / OPTICAL
-     #   {"ax": axes[0,0], "title": "Cloud Probability (%)", "cmap": "Blues", "data": generate_cloud_texture(seed=seed, roughness=6) * data_points['prob'], "vmax": 100},
-     #   {"ax": axes[0,1], "title": "Cloud Top Pressure (hPa)", "cmap": "gray_r", "data": generate_cloud_texture(seed=seed+1, roughness=8) * data_points['press'], "vmax": 1000},
-     #   {"ax": axes[0,2], "title": "Effective Radius (µm)", "cmap": "viridis", "data": generate_cloud_texture(seed=seed+2, roughness=4) * data_points['rad'], "vmax": 30},
-     #   {"ax": axes[0,3], "title": "Optical Depth", "cmap": "magma", "data": generate_cloud_texture(seed=seed+3, roughness=5) * data_points['opt'], "vmax": 50},
-     #   {"ax": axes[0,4], "title": "Phase (0=Clr,1=Liq,2=Ice)", "cmap": "cool", "data": generate_cloud_texture(seed=seed+4, roughness=10) * data_points['phase'], "vmax": 2},
-        
-        # ROW 2: ERA5 / INTERNAL PHYSICS
-     #   {"ax": axes[1,0], "title": "Liquid Water (kg/m³)", "cmap": "Blues", "data": generate_cloud_texture(seed=seed+5, roughness=7) * data_points['lwc'], "vmax": 0.01},
-     #   {"ax": axes[1,1], "title": "Ice Water Content", "cmap": "PuBu", "data": generate_cloud_texture(seed=seed+6, roughness=7) * (data_points['lwc']/3), "vmax": 0.01},
-     #   {"ax": axes[1,2], "title": "Rel. Humidity (%)", "cmap": "Greens", "data": generate_cloud_texture(seed=seed+7, roughness=10) * data_points['rh'], "vmax": 100},
-     #   {"ax": axes[1,3], "title": "Vertical Velocity (m/s)", "cmap": "RdBu_r", "data": (generate_cloud_texture(seed=seed+8, roughness=3) - 0.5) * 10, "vmax": 5},
-     #   {"ax": axes[1,4], "title": "Temperature (°C)", "cmap": "inferno", "data": generate_cloud_texture(seed=seed+9, roughness=15) * 10 + data_points['temp'], "vmax": 40},
-    #]
-
-    for p in plots:
-        ax = p['ax']
-        ax.set_facecolor('#0e1117')
-        im = ax.imshow(p['data'], cmap=p['cmap'], aspect='auto')
-        ax.set_title(p['title'], color="white", fontsize=9, fontweight='bold')
-        ax.axis('off')
-        plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-
-    plt.tight_layout()
-    buf = BytesIO()
-    plt.savefig(buf, format="png", facecolor='#0e1117', dpi=100)
-    buf.seek(0)
-    return Image.open(buf)
 
 # --- APP STATE INIT ---
 if 'all_sector_data' not in st.session_state:
@@ -247,7 +154,7 @@ if 'all_sector_data' not in st.session_state:
 with st.sidebar:
     st.image("https://cdn-icons-png.flaticon.com/512/414/414927.png", width=80)
     st.title("VisionRain")
-    st.caption("Kingdom Commander | v25.0 (Cloud Native)")
+    st.caption("Kingdom Commander | v25.0 (Simulation Stable)")
     
     st.markdown("### ☁️ Cloud Architecture")
     st.markdown('<div class="cloud-badge"><span class="status-ok">●</span> Cloud Run (App)</div>', unsafe_allow_html=True)
@@ -328,12 +235,13 @@ with tab2:
         s3.metric("Phase", "Liquid" if current_data['phase']==1 else "Ice/Mix")
         s4.metric("Status", current_data['status'])
 
-    # MAP & MATRIX
+    # MAP & METRICS
     col_map, col_matrix = st.columns([1, 2])
     
     with col_map:
         st.markdown("**Live Sector Map**")
-        m = folium.Map(location=SAUDI_SECTORS[current_region]['coords'], zoom_start=6, tiles="CartoDB dark_matter")
+        # Zoomed-in Map
+        m = folium.Map(location=SAUDI_SECTORS[current_region]['coords'], zoom_start=8, tiles="CartoDB dark_matter")
         
         for region_name, info in SAUDI_SECTORS.items():
             r_data = st.session_state.all_sector_data[region_name]
@@ -348,12 +256,15 @@ with tab2:
             if region_name == current_region:
                 folium.CircleMarker(info['coords'], radius=20, color="#00e5ff", fill=True, fill_opacity=0.2).add_to(m)
                 
-        st_folium(m, height=300, use_container_width=True)
+        st_folium(m, height=450, use_container_width=True)
 
     with col_matrix:
-        st.markdown("**Real-Time Microphysics Matrix (Meteosat + ERA5)**")
-        matrix_img = plot_scientific_matrix(current_data)
-        st.image(matrix_img, use_column_width=True)
+        st.markdown("**Full Microphysics Data**")
+        # Numerical data display instead of the 2x5 visual
+        st.dataframe(
+            pd.DataFrame([current_data]).T.rename(columns={0: "Value"}),
+            use_container_width=True
+        )
 
     st.divider()
 
@@ -387,20 +298,25 @@ with tab3:
     
     c1, c2 = st.columns([1, 1])
     with c1:
-        st.image(matrix_img, caption="Visual Input Tensor (NetCDF Visualized)")
-    with c2:
-        st.write("### Telemetry Packet")
+        # st.image(matrix_img, caption="Visual Input Tensor (NetCDF Visualized)") # Removed
+        st.write("### AI Input Metrics")
         st.json(current_data)
+        
+    with c2:
+        st.write("### Decision Rules")
+        st.markdown("""
+        * **Radius:** < 14 µm (Needed for seeding).
+        * **Temp:** -5°C to -15°C (Supercooled water required).
+        * **Phase:** Liquid (Ice is a No-Go).
+        """)
 
     if st.button("🚀 REQUEST AUTHORIZATION (VERTEX AI)", type="primary"):
         with st.status("Initializing Vertex AI Pipeline...") as status:
-            st.write("1. Fetching Model: `gemini-2.5-flash`...")
-            time.sleep(0.5)
-            st.write("2. Streaming Tensor Data to `us-central1`...")
+            status.update(label="1. Fetching Model: `gemini-2.5-flash`...")
             
             prompt = f"""
             ACT AS A METEOROLOGIST. Analyze {current_region}.
-            DATA: Prob: {current_data['prob']:.1f}%, Radius: {current_data['rad']:.1f}um, Phase: {current_data['phase']}, Temp: {current_data['temp']:.1f}C.
+            DATA: {json.dumps(current_data)}.
             RULES: GO IF Radius < 14 AND Radius > 5 AND Phase=1 (Liquid). NO-GO IF Phase=2 (Ice) OR Prob < 50.
             OUTPUT: Decision (GO/NO-GO), Reasoning, Protocol.
             """
@@ -419,26 +335,21 @@ with tab3:
                     response_text = f"Vertex AI Confidence: 95%. Conditions Unfavorable (Radius {current_data['rad']:.1f}µm)."
             else:
                 try:
-                    # Using standard GenerativeAI Lib but simulating Vertex behavior
                     genai.configure(api_key=api_key)
-                    # NOTE: Using 1.5-flash as the stable proxy for the requested 2.5 architecture
                     model = genai.GenerativeModel('gemini-2.5-flash')
-                    res = model.generate_content([prompt, matrix_img])
+                    
+                    status.update(label="2. Awaiting Gemini Decision...")
+                    res = model.generate_content(prompt)
                     response_text = res.text
                     decision = "GO" if "GO" in res.text.upper() else "NO-GO"
                 except Exception as e:
                     decision = "ERROR"; response_text = str(e)
 
-            st.write("3. Logging Decision to BigQuery...")
+            status.update(label="3. Logging Decision to BigQuery...", state="running")
+            save_mission_log(current_region, current_data, decision, response_text)
             status.update(label="Complete", state="complete")
-        
-        if "GO" in decision:
-            st.balloons()
-            st.success(f"✅ MISSION APPROVED: {response_text}")
-        else:
-            st.error(f"⛔ MISSION ABORTED: {response_text}")
             
-        save_mission_log(current_region, str(current_data), decision, response_text)
-        st.toast("Audit Log Saved to BigQuery", icon="☁️")
-
-
+            if "GO" in decision:
+                st.success(f"✅ MISSION APPROVED: {response_text}")
+            else:
+                st.error(f"⛔ MISSION ABORTED: {response_text}")
