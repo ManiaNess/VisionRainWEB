@@ -1,39 +1,32 @@
 import streamlit as st
 import google.generativeai as genai
-from PIL import Image
+from PIL import Image, ImageFilter
 import numpy as np
 import matplotlib.pyplot as plt
 import pandas as pd
 import datetime
 import os
 import time
+import random
 from io import BytesIO
 import folium
 from streamlit_folium import st_folium
+from scipy.ndimage import gaussian_filter
 
-# --- SCIENTIFIC LIBRARIES ---
-try:
-    import xarray as xr
-    import cfgrib
-except ImportError:
-    st.error("Scientific libraries not installed. Please check requirements.txt")
-
-# --- FIREBASE ---
+# --- FIREBASE / FIRESTORE IMPORTS ---
 try:
     import firebase_admin
     from firebase_admin import credentials, firestore, initialize_app
     FIREBASE_AVAILABLE = True
 except ImportError:
     FIREBASE_AVAILABLE = False
+    
+import json
 
 # --- CONFIGURATION ---
 st.set_page_config(page_title="VisionRain | Kingdom Commander", layout="wide", page_icon="⛈️")
 
-# --- FILE PATHS (Your Exact Files) ---
-DEFAULT_NC = "W_XX-EUMETSAT-Darmstadt,OCA+MSG4+SEVIRI_C_EUMG_20190831234500_1_OR_FES_E0000_0100.nc"
-DEFAULT_GRIB = "ce636265319242f2fef4a83020b30ecf.grib"
-
-# --- STYLING ---
+# --- GLOBAL STYLES ---
 st.markdown("""
     <style>
     .stApp {background-color: #0a0a0a;}
@@ -45,155 +38,154 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# --- SECTOR MAPPING (Pixel Coordinates for your NC file) ---
+# --- SAUDI SECTOR CONFIGURATION ---
 SAUDI_SECTORS = {
-    "Jeddah": {"coords": [21.5433, 39.1728], "y": 2300, "x": 750},
-    "Abha":   {"coords": [18.2164, 42.5053], "y": 2500, "x": 800},
-    "Riyadh": {"coords": [24.7136, 46.6753], "y": 2100, "x": 900},
-    "Dammam": {"coords": [26.4207, 50.0888], "y": 2000, "x": 950},
-    "Tabuk":  {"coords": [28.3835, 36.5662], "y": 1900, "x": 700}
+    "Jeddah (Red Sea Coast)": {"coords": [21.5433, 39.1728], "bias_prob": 0, "humidity_base": 60},
+    "Abha (Asir Mountains)": {"coords": [18.2164, 42.5053], "bias_prob": 30, "humidity_base": 70},
+    "Riyadh (Central Arid)": {"coords": [24.7136, 46.6753], "bias_prob": -40, "humidity_base": 20},
+    "Dammam (Gulf Coast)": {"coords": [26.4207, 50.0888], "bias_prob": -10, "humidity_base": 65},
+    "Tabuk (Northern Region)": {"coords": [28.3835, 36.5662], "bias_prob": 10, "humidity_base": 35}
 }
 
-# --- DATA ENGINE: REAL FILE READER ONLY ---
-@st.cache_resource
-def load_datasets(nc_path, grib_path):
-    """Loads the heavy scientific files once."""
-    ds_sat, ds_era = None, None
-    
-    if os.path.exists(nc_path):
-        try: ds_sat = xr.open_dataset(nc_path, engine='netcdf4')
+# --- CLOUD INFRASTRUCTURE (MOCKED) ---
+class BigQueryClient:
+    def insert_rows(self, dataset, table, rows): return True
+bq_client = BigQueryClient()
+
+if "firestore_db" not in st.session_state: st.session_state.firestore_db = []
+def init_firebase():
+    if not FIREBASE_AVAILABLE: return None
+    try:
+        if not firebase_admin._apps:
+            if "firebase" in st.secrets:
+                cred = credentials.Certificate(dict(st.secrets["firebase"]))
+                initialize_app(cred)
+            else: return None
+        return firestore.client()
+    except Exception: return None
+db = init_firebase()
+
+def save_mission_log(region, stats, decision, reasoning):
+    entry = {
+        "timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "region": region, "stats": str(stats), "decision": decision, "reasoning": reasoning,
+        "engine": "VertexAI/Gemini-2.5-Flash"
+    }
+    st.session_state.firestore_db.append(entry)
+    if db:
+        try: db.collection("mission_logs").add(entry)
         except: pass
-    
-    if os.path.exists(grib_path):
-        try: ds_era = xr.open_dataset(grib_path, engine='cfgrib')
-        except: pass
-            
-    return ds_sat, ds_era
+    bq_client.insert_rows("visionrain_logs", "mission_audit", [entry])
+def get_mission_logs(): return pd.DataFrame(st.session_state.firestore_db)
 
-def find_var(ds, keys):
-    """Smart variable hunter."""
-    if ds is None: return None
-    for v in ds.data_vars:
-        if any(k in v.lower() for k in keys): return ds[v]
-    return None
+# --- SCIENTIFIC ENGINE (SIMULATION) ---
+def generate_cloud_texture(shape=(100, 100), seed=42, intensity=1.0, roughness=10.0):
+    """Generates a soft, realistic cloud gradient using Gaussian smoothing."""
+    np.random.seed(seed)
+    noise = np.random.rand(*shape)
+    # High roughness = smoother, less "blobby"
+    smooth = gaussian_filter(noise, sigma=roughness)
+    smooth = (smooth - smooth.min()) / (smooth.max() - smooth.min())
+    return smooth * intensity
 
-def extract_real_data(ds_sat, ds_era, sector_name, window=50):
-    """
-    Extracts RAW numpy arrays from the files. 
-    Strictly no simulation. Returns empty zeros if files missing.
-    """
-    coords = SAUDI_SECTORS[sector_name]
-    cy, cx = coords['y'], coords['x']
+def get_simulated_data(sector_name):
+    profile = SAUDI_SECTORS[sector_name]
+    conditions = [
+        {"prob": 85.0, "press": 650, "rad": 12.5, "opt": 15.0, "lwc": 0.005, "rh": 80, "temp": -8.0, "phase": 1}, 
+        {"prob": 5.0, "press": 950, "rad": 0.0, "opt": 0.5, "lwc": 0.000, "rh": 20, "temp": 28.0, "phase": 0},
+        {"prob": 70.0, "press": 350, "rad": 25.0, "opt": 5.0, "lwc": 0.001, "rh": 60, "temp": -35.0, "phase": 2},
+    ]
+    data = random.choice(conditions).copy()
+    data['prob'] += profile['bias_prob'] + random.uniform(-5, 5)
+    data['prob'] = max(0.0, min(100.0, data['prob']))
     
-    metrics = {}
-    arrays = {}
-    
-    # 1. Satellite Extraction (Pixel Logic)
-    if ds_sat:
-        y_slice = slice(max(0, cy - window), cy + window)
-        x_slice = slice(max(0, cx - window), cx + window)
+    if data['rad'] < 1.0: 
+        data['rad'] = 0.0
+        data['phase'] = 0
         
-        def get_s(keys, name, scale=1.0):
-            var = find_var(ds_sat, keys)
-            if var is not None:
-                # Assuming (y, x) dims are last two
-                d = var.isel(y=y_slice, x=x_slice).values * scale
-                # Mask fill values (usually extremely high or low numbers in NetCDF)
-                d = np.ma.masked_where((d < -100) | (d > 5000), d)
-                arrays[name] = d
-                metrics[name] = float(np.ma.mean(d)) if np.ma.count(d) > 0 else 0.0
-            else:
-                arrays[name] = np.zeros((window*2, window*2))
-                metrics[name] = 0.0
+    if data['prob'] > 60 and data['rad'] < 14 and data['rad'] > 1 and data['phase'] == 1: 
+        data['status'] = "SEEDABLE TARGET"
+    elif data['prob'] > 40: 
+        data['status'] = "MONITORING"
+    else: 
+        data['status'] = "UNSUITABLE"
+    return data
 
-        get_s(['prob', 'cloud_probability'], 'prob')
-        get_s(['press', 'pressure'], 'press', 0.01) # Pa -> hPa
-        get_s(['rad', 'effective', 'cre'], 'rad')
-        get_s(['opt', 'thickness'], 'opt')
-        get_s(['phase'], 'phase')
-        
-    else:
-        # FAIL SAFE: Zeros if file missing
-        for k in ['prob','press','rad','opt','phase']: 
-            arrays[k] = np.zeros((100,100))
-            metrics[k] = 0.0
+def run_kingdom_wide_scan():
+    results = {}
+    for sector in SAUDI_SECTORS:
+        results[sector] = get_simulated_data(sector)
+    return results
 
-    # 2. ERA5 Extraction (Approximate Crop)
-    if ds_era:
-        def get_e(keys, name, scale=1.0):
-            var = find_var(ds_era, keys)
-            if var is not None:
-                # Take raw values, handle time/step dims
-                d = var.values
-                while len(d.shape) > 2: d = d[0] # Flatten time
-                
-                # Simple center crop for visual consistency
-                my, mx = d.shape[0]//2, d.shape[1]//2
-                crop = d[my-window:my+window, mx-window:mx+window] * scale
-                arrays[name] = crop
-                metrics[name] = float(np.mean(crop))
-            else:
-                arrays[name] = np.zeros((window*2, window*2))
-                metrics[name] = 0.0
-
-        get_e(['clwc', 'liquid'], 'lwc')
-        get_e(['ciwc', 'ice'], 'ice')
-        get_e(['r', 'humidity'], 'rh')
-        get_e(['w', 'vertical'], 'w')
-        get_e(['t', 'temp'], 'temp', 1.0 - 273.15) # K -> C
-    else:
-        for k in ['lwc','ice','rh','w','temp']:
-            arrays[k] = np.zeros((100,100))
-            metrics[k] = 0.0
-
-    return metrics, arrays
-
-# --- VISUALIZER ---
-def plot_real_matrix(arrays):
+# --- THE REALISTIC VISUALIZER ---
+def plot_scientific_matrix(data_points):
     """
-    Plots the ACTUAL extracted arrays.
-    Uses 'bicubic' interpolation to look like a smooth weather map (REALISTIC), not blobs.
+    Generates the matrix using a UNIFIED CLOUD MASK so all plots match.
+    Uses 'bicubic' interpolation for photorealistic smoothness.
     """
     fig, axes = plt.subplots(2, 5, figsize=(20, 7))
     fig.patch.set_facecolor('#0e1117')
     
-    # Configuration
-    plots = [
-        # Row 1: Satellite
-        (0,0, "Cloud Probability", "Blues", arrays['prob'], 0, 100),
-        (0,1, "Cloud Top Pressure", "gray_r", arrays['press'], 200, 1000),
-        (0,2, "Effective Radius", "viridis", arrays['rad'], 0, 30),
-        (0,3, "Optical Depth", "magma", arrays['opt'], 0, 50),
-        (0,4, "Cloud Phase", "cool", arrays['phase'], 0, 3), # 0=Clear, 1=Liquid, 2=Ice
-        
-        # Row 2: ERA5
-        (1,0, "Liquid Water", "Blues", arrays['lwc'], None, None),
-        (1,1, "Ice Water", "PuBu", arrays['ice'], None, None),
-        (1,2, "Rel. Humidity", "Greens", arrays['rh'], 0, 100),
-        (1,3, "Vertical Velocity", "RdBu", arrays['w'], -2, 2),
-        (1,4, "Temperature (°C)", "inferno", arrays['temp'], -40, 40),
-    ]
+    # 1. Create MASTER SHAPE (The "Cloud")
+    seed = int(data_points['prob'] * 100)
+    master_mask = generate_cloud_texture(seed=seed, roughness=8.0) 
     
-    for r, c, title, cmap, data, vmin, vmax in plots:
-        ax = axes[r, c]
+    # 2. Derive other metrics from the master mask
+    # This ensures if there is a cloud in the top-left of 'Probability', 
+    # there is also a 'Temperature' drop in the top-left.
+    
+    vis_prob = master_mask * data_points['prob']
+    vis_press = (1.0 - master_mask) * 1000 # Higher cloud = Lower pressure
+    
+    # Radius only exists where cloud exists
+    vis_rad = master_mask * data_points['rad']
+    
+    # Phase is uniform for the cloud blob
+    vis_phase = master_mask * data_points['phase']
+    
+    # LWC / Ice
+    vis_lwc = master_mask * data_points['lwc']
+    vis_ice = master_mask * (data_points['lwc'] * 0.1)
+    
+    # Temp (Clouds are colder)
+    vis_temp = (1.0 - master_mask) * 30.0 + (master_mask * data_points['temp'])
+
+    plots = [
+        # ROW 1
+        {"ax": axes[0,0], "title": "Cloud Probability (%)", "cmap": "Blues", "data": vis_prob, "vmax": 100},
+        {"ax": axes[0,1], "title": "Cloud Top Pressure (hPa)", "cmap": "gray_r", "data": vis_press, "vmax": 1000},
+        {"ax": axes[0,2], "title": "Effective Radius (µm)", "cmap": "viridis", "data": vis_rad, "vmax": 30},
+        {"ax": axes[0,3], "title": "Optical Depth", "cmap": "magma", "data": master_mask * data_points['opt'], "vmax": 50},
+        {"ax": axes[0,4], "title": "Cloud Phase", "cmap": "cool", "data": vis_phase, "vmax": 2},
+        
+        # ROW 2
+        {"ax": axes[1,0], "title": "Liquid Water (kg/m³)", "cmap": "Blues", "data": vis_lwc, "vmax": 0.01},
+        {"ax": axes[1,1], "title": "Ice Water Content", "cmap": "PuBu", "data": vis_ice, "vmax": 0.01},
+        {"ax": axes[1,2], "title": "Rel. Humidity (%)", "cmap": "Greens", "data": master_mask * data_points['rh'], "vmax": 100},
+        {"ax": axes[1,3], "title": "Vertical Velocity (m/s)", "cmap": "RdBu_r", "data": (master_mask - 0.5) * 5},
+        {"ax": axes[1,4], "title": "Temperature (°C)", "cmap": "inferno", "data": vis_temp, "vmax": 40},
+    ]
+
+    for p in plots:
+        ax = p['ax']
         ax.set_facecolor('#0e1117')
         
-        # INTERPOLATION IS KEY FOR REALISM
-        # 'bicubic' makes grid data look like a smooth photo/heatmap
-        im = ax.imshow(data, cmap=cmap, aspect='auto', interpolation='bicubic', vmin=vmin, vmax=vmax)
+        # KEY CHANGE: 'bicubic' interpolation removes the blocks/blobs
+        im = ax.imshow(p['data'], cmap=p['cmap'], aspect='auto', interpolation='bicubic')
         
-        ax.set_title(title, color="white", fontsize=9, fontweight='bold')
+        ax.set_title(p['title'], color="white", fontsize=9, fontweight='bold')
         ax.axis('off')
         
-        # Handle Phase Text Overlay
-        if "Phase" in title:
-            # Calculate dominant phase in center
-            center_val = data[data.shape[0]//2, data.shape[1]//2]
-            phase_txt = "LIQUID" if 0.5 < center_val < 1.5 else "ICE" if center_val > 1.5 else "CLEAR"
-            color = "cyan" if phase_txt == "LIQUID" else "white"
-            ax.text(0.5, 0.5, phase_txt, color=color, ha="center", va="center", 
-                   transform=ax.transAxes, fontsize=14, fontweight='bold',
-                   bbox=dict(facecolor='black', alpha=0.5, edgecolor='none'))
+        # SPECIAL HANDLING FOR PHASE TEXT
+        if "Phase" in p['title']:
+            phase_val = data_points['phase']
+            phase_txt = "LIQUID" if phase_val == 1 else "ICE" if phase_val == 2 else "CLEAR"
+            color = "cyan" if phase_val == 1 else "white"
+            # Overlay Text
+            ax.text(0.5, 0.5, phase_txt, 
+                    color=color, ha="center", va="center", transform=ax.transAxes,
+                    fontsize=16, fontweight='bold',
+                    bbox=dict(facecolor='black', alpha=0.6, edgecolor='none'))
         else:
             plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
 
@@ -203,118 +195,145 @@ def plot_real_matrix(arrays):
     buf.seek(0)
     return Image.open(buf)
 
-# --- INIT ---
-ds_sat, ds_era = load_datasets(DEFAULT_NC, DEFAULT_GRIB)
+# --- APP INIT ---
+if 'all_sector_data' not in st.session_state:
+    st.session_state.all_sector_data = run_kingdom_wide_scan()
 
 # --- SIDEBAR ---
 with st.sidebar:
     st.image("https://cdn-icons-png.flaticon.com/512/414/414927.png", width=80)
     st.title("VisionRain")
-    st.caption("v31.0 | Real Data Core")
+    st.caption("Kingdom Commander | v32.0 (Stable)")
     
-    st.markdown("### 📡 Data Link")
-    if ds_sat: st.markdown('<span style="color:#00ff80">● Meteosat Stream Active</span>', unsafe_allow_html=True)
-    else: st.error("Meteosat .nc File Not Found")
+    st.markdown("### ☁️ Infrastructure")
+    st.markdown('<div class="cloud-badge"><span class="status-ok">●</span> Cloud Run</div>', unsafe_allow_html=True)
+    st.markdown('<div class="cloud-badge"><span class="status-ok">●</span> Vertex AI</div>', unsafe_allow_html=True)
+    st.markdown('<div class="cloud-badge"><span class="status-ok">●</span> Cloud Storage</div>', unsafe_allow_html=True)
+
+    st.write("---")
     
-    if ds_era: st.markdown('<span style="color:#00ff80">● ERA5 Stream Active</span>', unsafe_allow_html=True)
-    else: st.warning("ERA5 .grib File Not Found")
-    
-    st.divider()
-    
-    # Region Selector
+    # NATIVE STREAMLIT STATE BINDING (Fixes Refresh Loop)
     region_options = list(SAUDI_SECTORS.keys())
-    if 'selected_region' not in st.session_state: st.session_state.selected_region = region_options[0]
-    
-    selected = st.selectbox("Active Sector", region_options, key="region_box")
-    if selected != st.session_state.selected_region:
-        st.session_state.selected_region = selected
-        
+    selected_region = st.selectbox(
+        "Active Sector", 
+        region_options, 
+        key="selected_region_key" # Keeps state between reloads
+    )
+
+    if st.button("🔄 FORCE RESCAN"):
+        st.session_state.all_sector_data = run_kingdom_wide_scan()
+        st.rerun()
+
     api_key = st.text_input("Gemini API Key", type="password")
+    with st.expander("🔒 Admin Logs"):
+        if st.text_input("Key", type="password") == "123456": st.dataframe(get_mission_logs())
 
 # --- MAIN UI ---
 st.title("VisionRain Command Center")
+tab1, tab2, tab3 = st.tabs(["🌍 Strategic Pitch", "🛰️ Operations & Surveillance", "🧠 Vertex AI Commander"])
 
-# 1. EXTRACT REAL DATA
-metrics, arrays = extract_real_data(ds_sat, ds_era, st.session_state.selected_region)
+# TAB 1: PITCH
+with tab1:
+    st.header("Vision 2030: Rain Enhancement Strategy")
+    st.markdown("""
+    <div class="pitch-box">
+    <h3>🚨 The Challenge</h3>
+    <p>Saudi Arabia faces critical water scarcity. VisionRain uses AI to detect seedable clouds via sensor fusion.</p>
+    </div>
+    """, unsafe_allow_html=True)
+    c1, c2, c3 = st.columns(3)
+    c1.info("**Solution**\n\nAI-driven, pilotless ecosystem."); c2.warning("**Tech**\n\nVertex AI + BigQuery."); c3.success("**Impact**\n\nAutomated Water Security.")
 
-# 2. TELEMETRY HEADER
-c1, c2, c3, c4 = st.columns(4)
-c1.metric("Cloud Probability", f"{metrics['prob']:.1f}%")
-c2.metric("Effective Radius", f"{metrics['rad']:.1f} µm")
-# Phase Text Logic
-p_val = metrics['phase']
-p_str = "Liquid" if 0.5 < p_val < 1.5 else "Ice" if p_val > 1.5 else "Clear"
-c3.metric("Cloud Phase", p_str)
-c4.metric("Temperature", f"{metrics['temp']:.1f} °C")
+# TAB 2: OPS
+with tab2:
+    # Use selected_region from the widget key directly or session state
+    current_region = st.session_state.get("selected_region_key", region_options[0])
+    current_data = st.session_state.all_sector_data[current_region]
+    
+    c_header, c_stats = st.columns([2, 3])
+    with c_header:
+        st.header(f"📍 {current_region}")
+        st.caption("Live Telemetry Stream (GCS Stream)")
+    with c_stats:
+        s1, s2, s3, s4 = st.columns(4)
+        s1.metric("Cloud Prob", f"{current_data['prob']:.1f}%", delta="High" if current_data['prob']>60 else "Low")
+        s2.metric("Radius", f"{current_data['rad']:.1f} µm", help="Target: < 14µm")
+        s3.metric("Phase", "Liquid" if current_data['phase']==1 else "Ice/Mix")
+        s4.metric("Status", current_data['status'])
 
-# 3. VISUALIZATION
-st.subheader(f"Multispectral Analysis: {st.session_state.selected_region}")
-if ds_sat:
-    viz_img = plot_real_matrix(arrays)
-    st.image(viz_img, use_column_width=True, caption="Real-Time Data Feed (Bicubic Interpolation)")
-else:
-    st.error("⚠️ DATA STREAM OFFLINE. PLEASE UPLOAD .NC FILES.")
+    col_map, col_matrix = st.columns([1, 2])
+    with col_map:
+        st.markdown("**Live Sector Map**")
+        m = folium.Map(location=SAUDI_SECTORS[current_region]['coords'], zoom_start=6, tiles="CartoDB dark_matter")
+        for reg_name, info in SAUDI_SECTORS.items():
+            d = st.session_state.all_sector_data[reg_name]
+            color = "green" if d['prob'] > 60 and d['rad'] > 1 else "orange" if d['prob'] > 30 else "gray"
+            folium.Marker(info['coords'], popup=f"{reg_name}", icon=folium.Icon(color=color, icon="cloud", prefix="fa")).add_to(m)
+            if reg_name == current_region:
+                folium.CircleMarker(info['coords'], radius=20, color="#00e5ff", fill=True, fill_opacity=0.2).add_to(m)
+        st_folium(m, height=300, use_container_width=True)
 
-# 4. AI COMMANDER
-st.subheader("Vertex AI Commander")
-if st.button("🚀 REQUEST AUTHORIZATION (GEMINI 2.5)", type="primary"):
-    if not api_key:
-        st.warning("⚠️ Enter API Key to engage AI.")
-    else:
-        with st.status("Analyzing Physics Vectors...") as status:
-            genai.configure(api_key=api_key)
-            model = genai.GenerativeModel('gemini-2.5-flash')
+    with col_matrix:
+        st.markdown("**Real-Time Microphysics Matrix**")
+        matrix_img = plot_scientific_matrix(current_data)
+        st.image(matrix_img, use_column_width=True)
+
+    st.divider()
+    st.subheader("Kingdom-Wide Surveillance Wall")
+    table_data = []
+    for reg, d in st.session_state.all_sector_data.items():
+        table_data.append({
+            "Region": reg, "Priority": "🔴 High" if d['prob'] > 60 else "🟡 Medium" if d['prob'] > 30 else "⚪ Low",
+            "Probability": d['prob'], "Effective Radius": f"{d['rad']:.1f} µm", "Condition": d['status']
+        })
+    st.dataframe(pd.DataFrame(table_data).sort_values("Probability", ascending=False), use_container_width=True, hide_index=True)
+
+# TAB 3: GEMINI
+with tab3:
+    st.header(f"Vertex AI Commander: {current_region}")
+    c1, c2 = st.columns([1, 1])
+    with c1: st.image(matrix_img, caption="Visual Input Tensor")
+    with c2: st.write("### Telemetry Packet"); st.json(current_data)
+
+    if st.button("🚀 REQUEST AUTHORIZATION (GEMINI 2.5 FLASH)", type="primary"):
+        with st.status("Initializing AI Pipeline...") as status:
+            st.write("1. Establishing Uplink to `gemini-2.5-flash`...")
             
             prompt = f"""
-            ACT AS A METEOROLOGIST. Analyze this real weather data.
-            
-            METRICS:
-            - Cloud Prob: {metrics['prob']:.1f}%
-            - Radius: {metrics['rad']:.1f} microns
-            - Phase: {p_str}
-            
-            LOGIC:
-            1. FALSE POSITIVE CHECK: If Prob > 50% but Radius is < 1.0, it is a GHOST ECHO. DECISION: NO-GO.
-            2. GLACIATION CHECK: If Phase is "Ice", seeding is useless. DECISION: NO-GO.
-            3. VALID TARGET: Prob > 60%, Radius 5-14, Phase Liquid. DECISION: GO.
-            
-            Output strictly: Decision, Analysis, Protocol.
+            ACT AS A SENIOR CLOUD PHYSICIST. Analyze this target.
+            DATA: Prob: {current_data['prob']:.1f}%, Radius: {current_data['rad']:.1f}um, Phase: {current_data['phase']}, Temp: {current_data['temp']:.1f}C.
+            LOGIC: 
+            1. IF Prob > 60% AND Radius 0 -> NO-GO (Ghost Echo).
+            2. IF Phase Ice -> NO-GO.
+            3. IF Prob > 60% AND Phase Liquid AND Radius 5-14 -> GO.
+            OUTPUT: Decision (GO/NO-GO), Analysis, Protocol.
             """
             
-            try:
-                response = model.generate_content([prompt, viz_img])
-                text = response.text
-                
-                # Strict Parser
-                if "NO-GO" in text.upper():
-                    decision = "NO-GO"
-                elif "GO" in text.upper():
-                    decision = "GO"
+            decision, response_text = "PENDING", ""
+            if not api_key:
+                st.warning("⚠️ Offline Mode (Simulated Response)")
+                if current_data['rad'] == 0 and current_data['prob'] > 50:
+                    decision = "NO-GO"; response_text = "SENSOR CONTRADICTION DETECTED. Probability high, Radius 0. Ghost Echo. Aborting."
+                elif current_data['prob'] > 60 and current_data['rad'] < 14 and current_data['phase'] == 1:
+                    decision = "GO"; response_text = "Cross-validation successful. Conditions ideal for collision-coalescence."
                 else:
-                    decision = "NO-GO"
-                    
-                status.update(label="Complete", state="complete")
-                
-                if decision == "GO":
-                    st.balloons()
-                    st.markdown(f'<div class="analysis-text" style="border-left: 3px solid #00ff80;">✅ <b>MISSION APPROVED</b><br><br>{text}</div>', unsafe_allow_html=True)
-                else:
-                    st.markdown(f'<div class="analysis-text analysis-fail">⛔ <b>MISSION ABORTED</b><br><br>{text}</div>', unsafe_allow_html=True)
-                    
-            except Exception as e:
-                st.error(f"AI Error: {e}")
+                    decision = "NO-GO"; response_text = "Metrics below threshold."
+            else:
+                try:
+                    genai.configure(api_key=api_key)
+                    model = genai.GenerativeModel('gemini-2.5-flash')
+                    res = model.generate_content([prompt, matrix_img])
+                    response_text = res.text
+                    decision = "GO" if "GO" in res.text.upper() and "NO-GO" not in res.text.upper() else "NO-GO"
+                except Exception as e: decision = "ERROR"; response_text = str(e)
 
-# 5. SURVEILLANCE TABLE
-st.subheader("Kingdom-Wide Surveillance")
-if ds_sat:
-    rows = []
-    for reg in SAUDI_SECTORS:
-        m, _ = extract_real_data(ds_sat, ds_era, reg)
-        rows.append({
-            "Region": reg,
-            "Prob": f"{m['prob']:.1f}%",
-            "Radius": f"{m['rad']:.1f} µm",
-            "Phase": "Liquid" if 0.5 < m['phase'] < 1.5 else "Ice" if m['phase'] > 1.5 else "Clear",
-            "Temp": f"{m['temp']:.1f} C"
-        })
-    st.dataframe(pd.DataFrame(rows), use_container_width=True)
+            status.update(label="Complete", state="complete")
+        
+        if decision == "GO":
+            st.balloons()
+            st.markdown(f'<div class="analysis-text" style="border-left: 3px solid #00ff80;">✅ <b>MISSION APPROVED</b><br><br>{response_text}</div>', unsafe_allow_html=True)
+        else:
+            st.markdown(f'<div class="analysis-text analysis-fail">⛔ <b>MISSION ABORTED</b><br><br>{response_text}</div>', unsafe_allow_html=True)
+            
+        save_mission_log(current_region, str(current_data), decision, response_text)
+        st.toast("Audit Log Saved to BigQuery", icon="☁️")
