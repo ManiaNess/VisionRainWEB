@@ -4,416 +4,361 @@ import pandas as pd
 import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
+import pydeck as pdk
+import google.generativeai as genai
 from datetime import datetime
 import os
 
 # ==========================================
-# 1. CONFIGURATION & PAGE SETUP
+# 1. CONFIGURATION & GOOGLE CLOUD STYLE
 # ==========================================
 st.set_page_config(
     page_title="VisionRain | Kingdom Commander",
-    page_icon="🌧️",
+    page_icon="⛈️",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-# CSS for "The Wall" - Professional Scientific Look
+# Custom CSS for that "Google Cloud Platform" Dark Mode aesthetic
 st.markdown("""
     <style>
+    .stApp {
+        background-color: #0e1117;
+    }
     .stMetric {
-        background-color: #0E1117;
-        border: 1px solid #303030;
-        padding: 10px;
-        border-radius: 5px;
+        background-color: #1f2937;
+        border: 1px solid #374151;
+        border-radius: 8px;
+        padding: 15px;
     }
-    .big-font {
-        font-size:20px !important;
-        font-weight: bold;
+    h1, h2, h3 {
+        color: #e5e7eb;
     }
-    .success-box {
+    .highlight-box {
+        border-left: 5px solid #4285F4;
+        background-color: #181b21;
+        padding: 15px;
+        border-radius: 0 5px 5px 0;
+    }
+    .gemini-box {
+        border: 1px solid #c084fc;
+        background: linear-gradient(135deg, rgba(29, 26, 56, 0.9) 0%, rgba(45, 10, 60, 0.9) 100%);
         padding: 20px;
-        background-color: rgba(0, 255, 0, 0.1);
-        border: 1px solid green;
-        border-radius: 5px;
-        color: #00ff00;
-    }
-    .fail-box {
-        padding: 20px;
-        background-color: rgba(255, 0, 0, 0.1);
-        border: 1px solid red;
-        border-radius: 5px;
-        color: #ff4b4b;
+        border-radius: 10px;
+        color: white;
     }
     </style>
     """, unsafe_allow_html=True)
 
 DATA_FILE = "b5710c0835b1558c7a5002809513f1a5.nc"
 LOG_FILE = "mission_logs.csv"
-ADMIN_PASSWORD = "123456"
 
 # ==========================================
-# 2. DATA ARCHITECTURE & PROCESSING
+# 2. INTELLIGENT DATA PROCESSING
 # ==========================================
 
 @st.cache_resource
-def load_data():
-    """Loads the ERA5 NetCDF file and pre-processes variables."""
+def load_and_process_data():
+    """
+    Loads ERA5, handles renaming, and computes aggregation over the 6-hour window.
+    """
     if not os.path.exists(DATA_FILE):
         return None
     
     try:
-        # Open dataset
         ds = xr.open_dataset(DATA_FILE, engine='netcdf4')
         
-        # --- FIX 1: COORDINATE RENAMING ---
-        # The error showed 'pressure_level' and 'valid_time' instead of 'level' and 'time'
+        # --- COORDINATE & VARIABLE STANDARDIZATION ---
         coord_renames = {}
-        if 'pressure_level' in ds.coords or 'pressure_level' in ds.dims:
-            coord_renames['pressure_level'] = 'level'
-        if 'valid_time' in ds.coords or 'valid_time' in ds.dims:
-            coord_renames['valid_time'] = 'time'
-        
-        if coord_renames:
-            ds = ds.rename(coord_renames)
+        if 'pressure_level' in ds.coords: coord_renames['pressure_level'] = 'level'
+        if 'valid_time' in ds.coords: coord_renames['valid_time'] = 'time'
+        if coord_renames: ds = ds.rename(coord_renames)
 
-        # --- FIX 2: VARIABLE RENAMING ---
-        # Rename variables to match your architecture for clarity
         rename_map = {
-            't': 'Temperature',
-            'r': 'Relative_Humidity',
-            'clwc': 'Specific_cloud_liquid_water_content',
-            'cc': 'Fraction_of_cloud_cover',
-            'u': 'U_component_of_wind',
-            'v': 'V_component_of_wind',
-            'z': 'Geopotential',
-            'w': 'Vertical_velocity',
-            'd': 'Divergence',
-            'q': 'Specific_humidity'
+            't': 'Temperature', 'r': 'Relative_Humidity', 
+            'clwc': 'Specific_cloud_liquid_water_content', 'cc': 'Fraction_of_cloud_cover',
+            'u': 'U_component_of_wind', 'v': 'V_component_of_wind',
+            'z': 'Geopotential', 'w': 'Vertical_velocity'
         }
-        
-        # Only rename what exists in the file
         actual_rename = {k: v for k, v in rename_map.items() if k in ds}
         ds = ds.rename(actual_rename)
         
-        # Convert Temperature K -> C
-        if 'Temperature' in ds:
-            ds['Temperature'] = ds['Temperature'] - 273.15
-            
-        # Select pressure levels of interest
-        # Ensure we only ask for levels that actually exist in the file to avoid errors
-        desired_levels = [1000, 925, 850, 700, 600, 500]
+        # Unit Conversions
+        if 'Temperature' in ds: ds['Temperature'] -= 273.15
         
-        # Check which levels are actually in the file
-        if 'level' in ds.dims:
-            file_levels = ds['level'].values
-            # Find nearest available levels for each desired level
-            ds = ds.sel(level=desired_levels, method='nearest')
+        # --- 6-HOUR AGGREGATION SCAN ---
+        # Instead of just taking the last hour, we look for the MAX potential over the file duration
+        # Focus on Cloud Layer (~700hPa)
+        ds_layer = ds.sel(level=700, method='nearest')
         
-        return ds
+        return ds, ds_layer
     except Exception as e:
-        st.error(f"Error reading NetCDF: {e}")
-        return None
+        st.error(f"Critical Data Error: {e}")
+        return None, None
 
-def scan_for_candidates(ds):
+def identify_clusters(ds_layer):
     """
-    AUTO-SCAN: Scans the dataset for regions matching seeding criteria.
-    Returns a dataframe of candidate locations.
+    Scans the entire 6-hour window and all of Saudi Arabia.
+    Returns the top seedable clusters.
     """
-    # Look at the latest time step (Real-time simulation)
-    # Using 'time' which we renamed from 'valid_time'
-    ds_now = ds.isel(time=-1) 
+    # Create a 2D map of "Max Seedability Score" across the 6 hours
+    # Logic: We take the MAX cloud cover and water content over the time dimension
     
-    # Target Level: 700hPa (Cloud middle/top for KSA)
-    target_layer = ds_now.sel(level=700, method='nearest')
+    # 1. Calculate Score for every pixel/time
+    # Score = (Cloud Cover * 50) + (LWC normalized * 50) + (RH/2)
+    # Note: LWC is small (e.g., 0.0001), so we multiply by huge factor
     
-    # Convert to DataFrame for easier filtering
-    df = target_layer.to_dataframe().reset_index()
+    score_da = (
+        (ds_layer['Fraction_of_cloud_cover'] * 40) + 
+        (ds_layer['Relative_Humidity'] * 0.4) + 
+        (ds_layer['Specific_cloud_liquid_water_content'] * 100000)
+    )
     
-    # --- PRE-FILTERING FOR SAUDI ARABIA ---
-    # Approx Bounds: Lat 16-32, Lon 34-56
+    # 2. Flatten to dataframe to find top candidates across ALL times
+    df = score_da.to_dataframe(name='Score').reset_index()
+    
+    # 3. Filter for Saudi Arabia
     df = df[(df['latitude'] >= 16) & (df['latitude'] <= 32) & 
             (df['longitude'] >= 34) & (df['longitude'] <= 56)]
     
-    # --- CANDIDATE PHYSICS LOGIC ---
-    # 1. Cloud Cover > 0.2 (20%)
-    # 2. Liquid Water Content > Threshold (e.g. 0.00001)
+    # 4. Filter Noise
+    df = df[df['Score'] > 40] # Minimum threshold
     
-    # Ensure columns exist before filtering (handling potential missing vars)
-    if 'Fraction_of_cloud_cover' in df.columns and 'Specific_cloud_liquid_water_content' in df.columns:
-        candidates = df[
-            (df['Fraction_of_cloud_cover'] > 0.2) & 
-            (df['Specific_cloud_liquid_water_content'] > 0.000005)
-        ].copy()
-    else:
-        # Fallback if specific vars are missing in this slice
-        candidates = df.head(0)
+    # 5. Add timestamp string for display
+    df['time_str'] = df['time'].astype(str)
+    
+    return df
 
-    # Calculate a simple "Seedability Score" (0-100) for visualization
-    if not candidates.empty:
-        # More Water + Lower Temp (up to -15) = Higher Score
-        # Using Relative Humidity as a proxy if available
-        rh_val = candidates['Relative_Humidity'] if 'Relative_Humidity' in candidates else 50
+def get_gemini_analysis(api_key, context_data):
+    """
+    The Brain: Sends metrics to Gemini 1.5/2.0 Flash for decision support.
+    """
+    if not api_key:
+        return "⚠️ **Gemini API Key missing.** Simulation: Conditions look favorable for hygroscopic seeding. High liquid water content detected."
+    
+    try:
+        genai.configure(api_key=api_key)
+        # Using 1.5 Flash as it's the current stable high-speed model
+        # You can change to "gemini-2.0-flash-exp" if you have access
+        model = genai.GenerativeModel('gemini-1.5-flash') 
         
-        candidates['Score'] = (
-            (candidates['Fraction_of_cloud_cover'] * 50) + 
-            (rh_val / 2)
-        ).clip(0, 100)
-    
-        return candidates.sort_values(by='Score', ascending=False).head(50) # Top 50 candidates
-    else:
-        return pd.DataFrame()
-
-def log_to_bigquery_sim(region_id, lat, lon, decision, reason, metrics):
-    """Simulates logging to BigQuery/CSV."""
-    log_entry = {
-        "Timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "Region_ID": region_id,
-        "Latitude": lat,
-        "Longitude": lon,
-        "Decision": decision,
-        "Reason": reason,
-        "Metrics_JSON": str(metrics)
-    }
-    
-    df_new = pd.DataFrame([log_entry])
-    
-    if os.path.exists(LOG_FILE):
-        df_new.to_csv(LOG_FILE, mode='a', header=False, index=False)
-    else:
-        df_new.to_csv(LOG_FILE, mode='w', header=True, index=False)
+        prompt = f"""
+        You are 'Kingdom Commander', an AI Cloud Seeding Meteorologist for Saudi Arabia.
+        Analyze the following cloud data taken from ERA5 satellite reanalysis:
+        
+        {context_data}
+        
+        Physics Rules:
+        - Temp -5C to -15C + Liquid Water = Glaciogenic Seeding (High Priority)
+        - Temp > 0C + High Humidity = Hygroscopic Seeding (Medium Priority)
+        - High Wind Shear = Drone Risk
+        
+        Output a concise 'Mission Brief' (max 100 words). 
+        1. Give a GO/NO-GO decision.
+        2. Identify the Seeding Method (Hygroscopic vs Glaciogenic).
+        3. Mention specific risks.
+        """
+        
+        response = model.generate_content(prompt)
+        return response.text
+    except Exception as e:
+        return f"Gemini Error: {e}"
 
 # ==========================================
-# 3. UI LAYOUT & TABS
+# 3. UI & VISUALIZATION
 # ==========================================
 
-ds = load_data()
+ds, ds_layer = load_and_process_data()
 
-st.title("🌧️ VisionRain: AI-Driven Cloud Seeding System")
-st.markdown("**Aligned with Saudi Vision 2030 & The Saudi Green Initiative**")
+# Sidebar for Controls
+with st.sidebar:
+    st.title("⚙️ Operations Center")
+    api_key = st.text_input("Google Gemini API Key", type="password", help="Required for AI Brain")
+    st.markdown("---")
+    st.info("Dataset: ERA5 Hourly (6 Hour Window)")
+    confidence_threshold = st.slider("Min Seedability Score", 0, 100, 50)
 
 if ds is None:
-    st.warning(f"⚠️ System Offline: Please upload valid ERA5 file ({DATA_FILE}) to the root directory.")
     st.stop()
 
-# Auto-Scan on Load
-candidates = scan_for_candidates(ds)
+# --- HEADER ---
+st.title("⛈️ VisionRain | Kingdom Commander")
+st.markdown("### AI-Driven Cloud Seeding Decision Support (Google Cloud/Vertex AI Integrated)")
 
-tabs = st.tabs(["🎯 The Core Mission", "🗺️ Kingdom Commander", "📊 The Wall (Deep Dive)", "🔐 Admin Portal"])
+# --- GLOBAL SCAN LOGIC ---
+all_candidates = identify_clusters(ds_layer)
+top_candidates = all_candidates[all_candidates['Score'] > confidence_threshold].sort_values('Score', ascending=False)
 
-# --- TAB 1: THE CORE MISSION ---
+# --- TABBED INTERFACE ---
+tabs = st.tabs(["🗺️ Geospatial Command", "🔬 Deep Dive Analysis", "🤖 Gemini Intelligence", "📊 Data Grid"])
+
+# 1. GEOSPATIAL COMMAND (The Visual Wow Factor)
 with tabs[0]:
-    col1, col2 = st.columns([2, 1])
+    col1, col2 = st.columns([3, 1])
+    
     with col1:
-        st.header("Problem Statement")
-        st.markdown("""
-        Regions such as Saudi Arabia face increasing environmental challenges, including water scarcity, prolonged droughts, and heightened wildfire risk. 
-        Current manual cloud seeding is **costly ($8,000/flight hour)**, **reactive**, and **weather-limited**. 
-        Operators miss short-lived seedable cloud opportunities.
-        """)
-        
-        st.header("Proposed Solution")
-        st.info("VisionRain: A Pilotless, AI-Driven Decision Support Platform.")
-        st.markdown("""
-        * **Automated:** Scans atmospheric data in real-time.
-        * **Predictive:** Identifies supercooled liquid water before rain forms.
-        * **Cost-Efficient:** Designed for future drone swarms (Negative Cost).
-        """)
-        
+        st.markdown("#### 🛰️ 3D Seedability Heatmap (Saudi Sector)")
+        if not top_candidates.empty:
+            # PyDeck 3D Visualization (Google Cloud Style)
+            layer = pdk.Layer(
+                "HexagonLayer",
+                top_candidates,
+                get_position=["longitude", "latitude"],
+                auto_highlight=True,
+                elevation_scale=200,
+                pickable=True,
+                elevation_range=[0, 3000],
+                extruded=True,
+                coverage=1,
+                get_fill_color="[255, Score * 2, 100, 200]", # Dynamic Red/Orange color
+            )
+            
+            view_state = pdk.ViewState(
+                longitude=45.0,
+                latitude=24.0,
+                zoom=4.5,
+                min_zoom=3,
+                max_zoom=10,
+                pitch=45.0, # 3D tilt
+                bearing=0
+            )
+            
+            r = pdk.Deck(
+                layers=[layer],
+                initial_view_state=view_state,
+                tooltip={"text": "Lat: {position[1]}\nLon: {position[0]}\nDensity: {elevationValue}"},
+                map_style="mapbox://styles/mapbox/dark-v10" # Requires token or use default
+            )
+            st.pydeck_chart(r)
+        else:
+            st.warning("No clusters found meeting current threshold.")
+
     with col2:
-        st.header("Impact")
-        st.metric("Global Drought Affected", "1.4 Billion People")
-        st.metric("Flight Cost Savings", "100%", delta="Switch to Drones")
-        st.metric("Water Sustainability", "Vision 2030 Priority")
+        st.markdown("#### 🎯 Priority Clusters")
+        st.write("Identified high-potential zones across the 6-hour window.")
+        
+        # Group by location (approximate) to show unique storms
+        # We round lat/lon to group nearby pixels
+        unique_storms = top_candidates.copy()
+        unique_storms['lat_round'] = unique_storms['latitude'].round(1)
+        unique_storms['lon_round'] = unique_storms['longitude'].round(1)
+        unique_storms = unique_storms.drop_duplicates(subset=['lat_round', 'lon_round']).head(5)
+        
+        for idx, row in unique_storms.iterrows():
+            with st.expander(f"Target {idx} (Score: {row['Score']:.0f})"):
+                st.write(f"📍 **{row['latitude']:.2f}, {row['longitude']:.2f}**")
+                st.write(f"🕒 Time: {row['time_str']}")
+                if st.button(f"Analyze Target {idx}", key=f"btn_{idx}"):
+                    st.session_state['selected_lat'] = row['latitude']
+                    st.session_state['selected_lon'] = row['longitude']
+                    st.session_state['selected_time'] = row['time']
 
-# --- TAB 2: KINGDOM COMMANDER (MAP) ---
+# 2. DEEP DIVE (Time Evolution)
 with tabs[1]:
-    st.subheader("📍 Real-Time Target Identification")
-    st.markdown("Automatic scan of Saudi Arabia Sector. Top seedable candidates identified based on Liquid Water Content and Atmospheric Stability.")
-    
-    # Map Visualization
-    if not candidates.empty:
-        fig_map = px.scatter_mapbox(
-            candidates, 
-            lat="latitude", 
-            lon="longitude", 
-            color="Score",
-            size="Score",
-            hover_data=["Temperature", "Specific_cloud_liquid_water_content", "Relative_Humidity"],
-            color_continuous_scale="Bluered",
-            zoom=4, 
-            center={"lat": 24.0, "lon": 45.0},
-            height=600,
-            mapbox_style="carto-darkmatter"
-        )
-        st.plotly_chart(fig_map, use_container_width=True)
+    if 'selected_lat' in st.session_state:
+        lat = st.session_state['selected_lat']
+        lon = st.session_state['selected_lon']
         
-        # Visual Table (Prompt Requirement #5)
-        st.subheader("📋 Regional Status Report")
-        display_cols = ['latitude', 'longitude', 'Temperature', 'Relative_Humidity', 'Fraction_of_cloud_cover', 'Score']
-        # Filter strictly to columns that exist
-        final_cols = [c for c in display_cols if c in candidates.columns]
+        st.markdown(f"### 📍 Target Analysis: {lat:.2f} N, {lon:.2f} E")
         
-        st.dataframe(
-            candidates[final_cols].style.background_gradient(cmap='Blues')
-        )
-    else:
-        st.warning("No suitable clouds found in current sector scan.")
-
-# --- TAB 3: THE WALL (ANALYSIS & AI BRAIN) ---
-with tabs[2]:
-    st.subheader("🔬 Deep Analysis & AI Decision")
-    
-    if candidates.empty:
-        st.write("No targets available for analysis.")
-    else:
-        # Selector for specific target
-        selected_index = st.selectbox(
-            "Select Target Coordinates:", 
-            candidates.index, 
-            format_func=lambda x: f"Lat: {candidates.loc[x, 'latitude']:.2f}, Lon: {candidates.loc[x, 'longitude']:.2f} (Score: {candidates.loc[x, 'Score']:.0f})"
-        )
+        # Extract 6-hour time series for this specific location
+        # Get all levels for this location
+        loc_ds = ds.sel(latitude=lat, longitude=lon, method='nearest')
         
-        target = candidates.loc[selected_index]
+        # Convert to dataframe for plotting
+        loc_df = loc_ds.to_dataframe().reset_index()
         
-        # Retrieve full vertical profile for this location
-        # Using the latest time step
-        loc_data = ds.isel(time=-1).sel(
-            latitude=target['latitude'], 
-            longitude=target['longitude'], 
-            method='nearest'
-        )
+        # FILTER: Just look at 700hPa for the time series overview
+        loc_700 = loc_df[loc_df['level'] == 700]
         
-        # --- 4. THE VISUAL DASHBOARD ("THE WALL") ---
-        col_dash1, col_dash2 = st.columns([2, 1])
+        col_g1, col_g2 = st.columns(2)
         
-        with col_dash1:
-            st.markdown("#### 📉 Vertical Atmospheric Profile")
+        with col_g1:
+            st.markdown("#### ⏳ Cloud Evolution (6 Hours)")
+            # Dual axis plot: Liquid Water vs Cloud Cover
+            fig_time = go.Figure()
+            fig_time.add_trace(go.Scatter(x=loc_700['time'], y=loc_700['Specific_cloud_liquid_water_content'],
+                                     name='Liquid Water', line=dict(color='#00d4ff', width=3)))
+            fig_time.add_trace(go.Scatter(x=loc_700['time'], y=loc_700['Fraction_of_cloud_cover'],
+                                     name='Cloud Cover', yaxis='y2', line=dict(color='#888888', dash='dot')))
             
-            # Create subplots for the Matrix of Scientific Plots
-            fig = go.Figure()
+            fig_time.update_layout(
+                yaxis=dict(title="LWC (kg/kg)"),
+                yaxis2=dict(title="Cloud Fraction", overlaying='y', side='right'),
+                template="plotly_dark",
+                legend=dict(orientation="h", y=1.1)
+            )
+            st.plotly_chart(fig_time, use_container_width=True)
             
-            # 1. Temperature Profile
-            if 'Temperature' in loc_data:
-                fig.add_trace(go.Scatter(
-                    x=loc_data['Temperature'].values, 
-                    y=loc_data['level'].values, 
-                    mode='lines+markers', 
-                    name='Temp (°C)',
-                    line=dict(color='red')
-                ))
+        with col_g2:
+            st.markdown("#### 🌡️ Stability & Temp (Vertical Profile)")
+            # Pick the specific time selected or the time of max score
+            # For simplicity, we plot the Mean profile over 6 hours
+            mean_profile = loc_df.groupby('level').mean(numeric_only=True).reset_index()
             
-            # 2. Dewpoint/Humidity Proxy (RH)
-            if 'Relative_Humidity' in loc_data:
-                fig.add_trace(go.Scatter(
-                    x=loc_data['Relative_Humidity'].values, 
-                    y=loc_data['level'].values, 
-                    mode='lines+markers', 
-                    name='Rel. Humidity (%)',
-                    line=dict(color='blue', dash='dot')
-                ))
-
-            fig.update_layout(
-                title=f"Skew-T Proxy: Lat {target['latitude']:.2f}, Lon {target['longitude']:.2f}",
+            fig_skew = go.Figure()
+            fig_skew.add_trace(go.Scatter(x=mean_profile['Temperature'], y=mean_profile['level'],
+                                     name='Temp (°C)', line=dict(color='red', width=3)))
+            fig_skew.add_trace(go.Scatter(x=mean_profile['Relative_Humidity']*100, y=mean_profile['level'],
+                                     name='RH (%)', line=dict(color='green', width=2)))
+            
+            fig_skew.update_layout(
                 yaxis=dict(title="Pressure (hPa)", autorange="reversed"),
                 xaxis=dict(title="Value"),
-                template="plotly_dark",
-                height=500
+                title="Mean Vertical Profile (6hr Avg)",
+                template="plotly_dark"
             )
-            st.plotly_chart(fig, use_container_width=True)
-            
-            # Wind Vectors (Drone Safety)
-            st.markdown("#### 🚁 Drone Wind Vector Analysis")
-            if 'U_component_of_wind' in target and 'V_component_of_wind' in target:
-                wind_speed = np.sqrt(target['U_component_of_wind']**2 + target['V_component_of_wind']**2)
-                st.metric("Wind Speed (Combined)", f"{wind_speed:.2f} m/s")
-            else:
-                st.write("Wind data unavailable.")
+            st.plotly_chart(fig_skew, use_container_width=True)
 
-        with col_dash2:
-            st.markdown("#### 🔢 Live Metrics (700hPa)")
-            # Safety checks for metrics
-            t_val = target['Temperature'] if 'Temperature' in target else 0
-            lwc_val = target['Specific_cloud_liquid_water_content'] if 'Specific_cloud_liquid_water_content' in target else 0
-            cc_val = target['Fraction_of_cloud_cover'] if 'Fraction_of_cloud_cover' in target else 0
-            vv_val = target['Vertical_velocity'] if 'Vertical_velocity' in target else 0
-            rh_val = target['Relative_Humidity'] if 'Relative_Humidity' in target else 0
+# 3. GEMINI INTELLIGENCE
+with tabs[2]:
+    if 'selected_lat' in st.session_state:
+        st.markdown("### 🤖 Gemini 2.0 Flash: Mission Brief")
+        
+        # Prepare Data for LLM
+        # We need to give it the exact metrics for the selected time
+        sel_time = st.session_state['selected_time']
+        
+        # Grab the specific slice
+        point_data = ds.sel(latitude=st.session_state['selected_lat'], 
+                           longitude=st.session_state['selected_lon'], 
+                           time=sel_time, method='nearest').sel(level=700, method='nearest')
+        
+        metrics_dict = {
+            "Location": f"{st.session_state['selected_lat']:.2f}, {st.session_state['selected_lon']:.2f}",
+            "Time": str(sel_time.values),
+            "Temperature_700hPa": float(point_data['Temperature']),
+            "Humidity_700hPa": float(point_data['Relative_Humidity']),
+            "Liquid_Water_Content": float(point_data['Specific_cloud_liquid_water_content']),
+            "Vertical_Velocity": float(point_data['Vertical_velocity']),
+            "Wind_U": float(point_data['U_component_of_wind']),
+            "Wind_V": float(point_data['V_component_of_wind']),
+        }
+        
+        col_ai1, col_ai2 = st.columns([1, 2])
+        
+        with col_ai1:
+            st.json(metrics_dict)
+        
+        with col_ai2:
+            if st.button("GENERATE AI MISSION BRIEF"):
+                with st.spinner("Gemini is analyzing atmospheric physics..."):
+                    ai_response = get_gemini_analysis(api_key, str(metrics_dict))
+                    
+                st.markdown(f"""
+                <div class="gemini-box">
+                    <h3>⚡ Gemini Assessment</h3>
+                    {ai_response}
+                </div>
+                """, unsafe_allow_html=True)
+                
+                # BigQuery Simulation Log
+                if "GO" in ai_response.upper():
+                    st.toast("Auto-logged 'GO' decision to BigQuery", icon="✅")
+    else:
+        st.info("Please select a target from the Geospatial Command tab first.")
 
-            st.metric("Temperature", f"{t_val:.2f} °C")
-            st.metric("Liquid Water Content", f"{lwc_val:.5f} kg/kg")
-            st.metric("Cloud Cover", f"{cc_val*100:.1f} %")
-            st.metric("Vertical Velocity", f"{vv_val:.4f} Pa/s")
-            
-            # 5. THE AI BRAIN (GEMINI FUSION)
-            st.divider()
-            st.subheader("🤖 Gemini Fusion Core")
-            
-            # --- PHYSICS RULES ENGINE ---
-            # Rule 1: Temperature Window (-5 to -15 ideal for seeding)
-            temp_check = -15 <= t_val <= -5
-            
-            # Rule 2: Cloud Phase (Proxy)
-            # If Temp < 0 and LWC > 0, we have Supercooled Liquid Water
-            phase = "Ice" if t_val < -40 else ("Mixed" if t_val < 0 else "Liquid")
-            phase_check = (phase == "Mixed") and (lwc_val > 1e-5)
-            
-            # Rule 3: Radius (Simulated for Demo as ERA5 lacks this)
-            simulated_radius = 12.5 # microns (Simulated)
-            
-            st.write(f"**Observed Phase:** {phase}")
-            st.write(f"**Est. Droplet Radius:** {simulated_radius} µm")
-            
-            # FINAL DECISION
-            if temp_check and phase_check:
-                decision = "GO"
-                reason = "Optimal Supercooled Liquid Water Detected. Temp within -5°C to -15°C range."
-                box_class = "success-box"
-                btn_label = "🚀 INITIATE DRONE SWARM"
-            else:
-                decision = "NO-GO"
-                reason = []
-                if not temp_check: reason.append(f"Temp {t_val:.1f}°C out of seedable range (-5 to -15).")
-                if not phase_check: reason.append("Insufficient Liquid Water Content.")
-                reason = " ".join(reason)
-                box_class = "fail-box"
-                btn_label = "❌ ABORT MISSION"
-
-            st.markdown(f"""
-            <div class="{box_class}">
-                <h2 style='text-align: center; margin:0;'>DECISION: {decision}</h2>
-                <p style='text-align: center;'>{reason}</p>
-            </div>
-            """, unsafe_allow_html=True)
-            
-            # Action Button
-            if st.button(btn_label):
-                metrics_log = {
-                    "temp": t_val,
-                    "lwc": lwc_val,
-                    "rh": rh_val
-                }
-                log_to_bigquery_sim(selected_index, target['latitude'], target['longitude'], decision, reason, metrics_log)
-                st.toast(f"Mission Logged to BigQuery: {decision}")
-
-# --- TAB 4: ADMIN PORTAL ---
+# 4. DATA GRID
 with tabs[3]:
-    st.header("🔐 Admin Portal")
-    pwd = st.text_input("Enter Access Code", type="password")
-    
-    if pwd == ADMIN_PASSWORD:
-        st.success("Access Granted")
-        if os.path.exists(LOG_FILE):
-            st.subheader("🗄️ Mission Logs (Simulating BigQuery)")
-            df_logs = pd.read_csv(LOG_FILE)
-            st.dataframe(df_logs)
-            
-            st.download_button(
-                "📥 Export Logs to CSV",
-                df_logs.to_csv(index=False).encode('utf-8'),
-                "mission_logs.csv",
-                "text/csv",
-                key='download-csv'
-            )
-        else:
-            st.info("No missions logged yet.")
-    elif pwd:
-        st.error("Invalid Access Code")
+    st.markdown("### 📊 Raw Scientific Data (Filtered)")
+    st.dataframe(top_candidates[['time', 'latitude', 'longitude', 'Score', 'Temperature', 'Relative_Humidity', 'Specific_cloud_liquid_water_content']])
