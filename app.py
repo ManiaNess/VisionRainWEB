@@ -91,6 +91,18 @@ def load_data():
         st.error(f"Data Load Error: {e}")
         return None
 
+def get_full_grid_for_hour(ds, time_index):
+    """Extracts the full grid data for visual context (contour plots)."""
+    try:
+        ds_slice = ds.isel(time=time_index).sel(level=700, method='nearest')
+        df = ds_slice.to_dataframe().reset_index()
+        # Filter for Saudi region loosely
+        df = df[(df['latitude'] >= 16) & (df['latitude'] <= 32) & 
+                (df['longitude'] >= 34) & (df['longitude'] <= 56)]
+        return df
+    except:
+        return pd.DataFrame()
+
 def process_cities_for_hour(ds, time_index):
     """Extracts data for Major Cities at a specific hour."""
     try:
@@ -158,7 +170,7 @@ def get_gemini_brief(api_key, metrics, decision, formation, city_name):
     
     try:
         genai.configure(api_key=api_key)
-        model = genai.GenerativeModel('gemini-2.5-flash') 
+        model = genai.GenerativeModel('gemini-2.0-flash-exp') 
         
         prompt = f"""
         Act as 'Kingdom Commander' AI for Saudi Cloud Seeding.
@@ -224,6 +236,9 @@ with tab2:
     
     # Process Data
     df_cities, timestamp = process_cities_for_hour(ds, hour_idx)
+    # --- FIX: Also get the full grid for the Visuals in Tab 3 ---
+    df_full_grid = get_full_grid_for_hour(ds, hour_idx)
+    
     st.write(f"**Scanning Time:** {str(timestamp)}")
     
     # Sort by Score
@@ -259,6 +274,7 @@ with tab2:
     # Store for Tab 3
     st.session_state['target_row'] = target_row
     st.session_state['target_time'] = timestamp
+    st.session_state['df_full_grid'] = df_full_grid # Store full grid for Tab 3 context
     
     # Visuals
     m_col1, m_col2, m_col3 = st.columns(3)
@@ -283,35 +299,60 @@ with tab2:
 with tab3:
     if 'target_row' in st.session_state:
         target = st.session_state['target_row']
+        df_context = st.session_state.get('df_full_grid', pd.DataFrame())
         
         st.markdown('<div class="sub-header">🤖 AI Mission Commander</div>', unsafe_allow_html=True)
         
         col_ai_viz, col_ai_desc = st.columns([1, 1])
         
         # Logic
-        is_seedable = target['Score'] > 25 # Lower threshold for demo
+        is_seedable = target['Score'] > 25 
         cc = target['Fraction_of_cloud_cover']
         
         if cc > 0.7:
             formation = "Formation A (6 Drones)"
             drones = 6
-            spread_desc = "High Spread. Max coverage."
         elif cc > 0.3:
             formation = "Formation B (4 Drones)"
             drones = 4
-            spread_desc = "Moderate Spread."
         else:
             formation = "Formation C (2 Drones)"
             drones = 2
-            spread_desc = "Precision Strike."
 
         with col_ai_viz:
-            st.markdown(f"#### ☁️ Cloud Topology: {target['City']}")
-            # Simulated local cloud spread for visual
-            # In a real app, we'd slice grid pixels around the city coords
-            # Here we just show the city point context
+            st.markdown(f"#### ☁️ Real-Time Cloud Spread: {target['City']}")
             
-            # Drone Blueprint
+            # 1. CLOUD SPREAD PLOT (Restored)
+            lat_c, lon_c = target['latitude'], target['longitude']
+            
+            if not df_context.empty:
+                # Filter a 2x2 degree box around city
+                local_df = df_context[
+                    (df_context['latitude'] >= lat_c - 1.5) & (df_context['latitude'] <= lat_c + 1.5) &
+                    (df_context['longitude'] >= lon_c - 1.5) & (df_context['longitude'] <= lon_c + 1.5)
+                ]
+                
+                if not local_df.empty:
+                    fig_spread = px.density_contour(
+                        local_df, 
+                        x='longitude', 
+                        y='latitude', 
+                        z='Fraction_of_cloud_cover',
+                        histfunc="avg",
+                        title=f"Cloud Structure (700hPa)",
+                        color_discrete_sequence=['cyan']
+                    )
+                    # Add City Marker
+                    fig_spread.add_trace(go.Scatter(x=[lon_c], y=[lat_c], mode='markers', marker=dict(color='red', size=10, symbol='cross'), name=target['City']))
+                    fig_spread.update_layout(template="plotly_dark", plot_bgcolor="rgba(0,0,0,0)", margin=dict(l=0, r=0, t=30, b=0), height=300)
+                    st.plotly_chart(fig_spread, use_container_width=True)
+                else:
+                    st.warning("No satellite grid data near this location.")
+            else:
+                st.warning("Full grid data not loaded.")
+
+            # 2. DRONE BLUEPRINT (Below Spread)
+            st.markdown("#### 📡 Drone Blueprint")
             if drones == 6:
                 drone_pos = pd.DataFrame({'x': [-1, 1, -2, 2, 0, 0], 'y': [1, 1, 0, 0, -1, -2]})
             elif drones == 4:
@@ -319,9 +360,9 @@ with tab3:
             else:
                 drone_pos = pd.DataFrame({'x': [-0.5, 0.5], 'y': [0, 0]})
             
-            fig_drones = px.scatter(drone_pos, x='x', y='y', title=f"Drone Blueprint: {formation}", size_max=20)
-            fig_drones.update_traces(marker=dict(size=20, symbol="triangle-up", color="#00ff00"))
-            fig_drones.update_layout(xaxis=dict(visible=False), yaxis=dict(visible=False), template="plotly_dark", plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)")
+            fig_drones = px.scatter(drone_pos, x='x', y='y', title=f"Config: {formation}", size_max=15)
+            fig_drones.update_traces(marker=dict(size=15, symbol="triangle-up", color="#00ff00"))
+            fig_drones.update_layout(xaxis=dict(visible=False), yaxis=dict(visible=False), template="plotly_dark", plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)", margin=dict(l=0, r=0, t=30, b=0), height=200)
             st.plotly_chart(fig_drones, use_container_width=True)
 
         with col_ai_desc:
