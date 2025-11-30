@@ -209,7 +209,7 @@ with tab2:
     # Sort and show top
     top_targets = df_hour.sort_values(by='Score', ascending=False).head(10)
     
-    # Interactive Table - User clicks a row to "Select" (Simulated via Selectbox for stability)
+    # Interactive Table
     st.dataframe(top_targets[['latitude', 'longitude', 'Score', 'Fraction_of_cloud_cover', 'Specific_cloud_liquid_water_content', 'Temperature']].style.background_gradient(cmap='Reds'))
     
     # 5. Selected Region Deep Dive
@@ -223,7 +223,6 @@ with tab2:
     st.session_state['target_time'] = timestamp
     
     # VISUALS FOR ALL METRICS
-    # We will show 3 columns of metrics
     m_col1, m_col2, m_col3 = st.columns(3)
     
     with m_col1:
@@ -233,15 +232,12 @@ with tab2:
     
     with m_col2:
         st.metric("Rel. Humidity (0-1)", f"{target_row['Relative_Humidity']:.2f}")
-        # Divergence
         div_val = target_row['Divergence'] if 'Divergence' in target_row else 0
         st.metric("Divergence (s^-1)", f"{div_val:.2e}")
-        # Vertical Velocity
         w_val = target_row['Vertical_velocity'] if 'Vertical_velocity' in target_row else 0
         st.metric("Vertical Velocity (Pa/s)", f"{w_val:.2f}")
 
     with m_col3:
-        # Wind
         u = target_row['U_component_of_wind'] if 'U_component_of_wind' in target_row else 0
         v = target_row['V_component_of_wind'] if 'V_component_of_wind' in target_row else 0
         speed = np.sqrt(u**2 + v**2)
@@ -270,11 +266,6 @@ with tab3:
         is_seedable = target['Score'] > 40
         
         # 2. Determine Drone Formation
-        # Logic: 
-        # High Cloud Cover (>0.8) OR High Divergence -> Spread out -> Formation A (6 Drones)
-        # Medium Cloud Cover (0.4-0.8) -> Formation B (4 Drones)
-        # Low/Concentrated -> Formation C (2 Drones)
-        
         cc = target['Fraction_of_cloud_cover']
         if cc > 0.8:
             formation = "Formation A (6 Drones)"
@@ -291,7 +282,7 @@ with tab3:
 
         with col_ai_viz:
             st.markdown("#### 📡 Drone Formation Preview")
-            # Visualize Drone Positions relative to Cloud Center (0,0)
+            
             # Create synthetic drone coordinates for the plot
             if drones == 6:
                 drone_pos = pd.DataFrame({'x': [-1, 1, -2, 2, 0, 0], 'y': [1, 1, 0, 0, -1, -2]})
@@ -302,7 +293,15 @@ with tab3:
             
             fig_drones = px.scatter(drone_pos, x='x', y='y', title=f"{formation}", size_max=20)
             fig_drones.update_traces(marker=dict(size=20, symbol="triangle-up", color="#00ff00"))
-            fig_drones.update_layout(xaxis_visible=False, yaxis_visible=False, template="plotly_dark", bg_color="rgba(0,0,0,0)")
+            
+            # --- FIX: Updated layout properties to be valid ---
+            fig_drones.update_layout(
+                xaxis=dict(visible=False),
+                yaxis=dict(visible=False),
+                template="plotly_dark",
+                plot_bgcolor="rgba(0,0,0,0)",
+                paper_bgcolor="rgba(0,0,0,0)"
+            )
             st.plotly_chart(fig_drones, use_container_width=True)
 
         with col_ai_desc:
