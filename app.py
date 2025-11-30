@@ -6,375 +6,327 @@ import plotly.express as px
 import plotly.graph_objects as go
 import pydeck as pdk
 import google.generativeai as genai
-from datetime import datetime
 import os
 
 # ==========================================
-# 1. CONFIGURATION & GOOGLE CLOUD STYLE
+# 1. CONFIGURATION & STYLING
 # ==========================================
 st.set_page_config(
     page_title="VisionRain | Kingdom Commander",
     page_icon="⛈️",
     layout="wide",
-    initial_sidebar_state="expanded"
+    initial_sidebar_state="collapsed"
 )
 
-# Custom CSS for that "Google Cloud Platform" Dark Mode aesthetic
+# Dark Mode / Google Cloud Console Aesthetic
 st.markdown("""
     <style>
-    .stApp {
-        background-color: #0e1117;
-    }
-    .stMetric {
-        background-color: #1f2937;
-        border: 1px solid #374151;
-        border-radius: 8px;
-        padding: 15px;
-    }
-    h1, h2, h3 {
-        color: #e5e7eb;
-    }
-    .highlight-box {
-        border-left: 5px solid #4285F4;
-        background-color: #181b21;
-        padding: 15px;
-        border-radius: 0 5px 5px 0;
-    }
-    .gemini-box {
-        border: 1px solid #c084fc;
-        background: linear-gradient(135deg, rgba(29, 26, 56, 0.9) 0%, rgba(45, 10, 60, 0.9) 100%);
-        padding: 20px;
-        border-radius: 10px;
-        color: white;
+    .stApp {background-color: #0e1117;}
+    .stMetric {background-color: #1f2937; border: 1px solid #374151; border-radius: 8px; padding: 15px;}
+    .big-header {font-size: 32px; font-weight: bold; color: #e5e7eb; margin-bottom: 20px;}
+    .sub-header {font-size: 24px; font-weight: bold; color: #4285F4; margin-top: 20px;}
+    .drone-card {
+        background: linear-gradient(135deg, rgba(16, 185, 129, 0.1) 0%, rgba(5, 150, 105, 0.1) 100%);
+        border: 1px solid #10b981; padding: 20px; border-radius: 10px; color: #d1fae5;
     }
     </style>
     """, unsafe_allow_html=True)
 
 DATA_FILE = "b5710c0835b1558c7a5002809513f1a5.nc"
-LOG_FILE = "mission_logs.csv"
 
 # ==========================================
-# 2. INTELLIGENT DATA PROCESSING
+# 2. DATA ENGINE
 # ==========================================
 
 @st.cache_resource
-def load_and_process_data():
-    """
-    Loads ERA5, handles renaming, and computes aggregation over the 6-hour window.
-    """
+def load_data():
+    """Loads and standardizes the ERA5 dataset."""
     if not os.path.exists(DATA_FILE):
-        return None, None
+        return None
     
     try:
         ds = xr.open_dataset(DATA_FILE, engine='netcdf4')
         
-        # --- COORDINATE & VARIABLE STANDARDIZATION ---
+        # Rename coords
         coord_renames = {}
         if 'pressure_level' in ds.coords: coord_renames['pressure_level'] = 'level'
         if 'valid_time' in ds.coords: coord_renames['valid_time'] = 'time'
         if coord_renames: ds = ds.rename(coord_renames)
 
+        # Rename variables to your specific list
         rename_map = {
             't': 'Temperature', 'r': 'Relative_Humidity', 
             'clwc': 'Specific_cloud_liquid_water_content', 'cc': 'Fraction_of_cloud_cover',
             'u': 'U_component_of_wind', 'v': 'V_component_of_wind',
-            'z': 'Geopotential', 'w': 'Vertical_velocity'
+            'z': 'Geopotential', 'w': 'Vertical_velocity', 'd': 'Divergence', 'q': 'Specific_humidity'
         }
         actual_rename = {k: v for k, v in rename_map.items() if k in ds}
         ds = ds.rename(actual_rename)
         
         # Unit Conversions
-        if 'Temperature' in ds: ds['Temperature'] -= 273.15
+        if 'Temperature' in ds: ds['Temperature'] -= 273.15 # K to C
         
-        # --- 6-HOUR AGGREGATION SCAN ---
-        # Focus on Cloud Layer (~700hPa)
-        # We ensure we select the level but keep the dataset structure
-        if 'level' in ds.coords:
-            ds_layer = ds.sel(level=700, method='nearest')
-        else:
-            ds_layer = ds # Fallback if no levels
-        
-        return ds, ds_layer
+        return ds
     except Exception as e:
-        st.error(f"Critical Data Error: {e}")
-        return None, None
+        st.error(f"Data Load Error: {e}")
+        return None
 
-def identify_clusters(ds_layer):
-    """
-    Scans the entire 6-hour window and all of Saudi Arabia.
-    Returns the top seedable clusters WITH all meteorological data.
-    """
-    # 1. Calculate Score (DataArray)
-    # Check if variables exist to avoid KeyError during calculation
-    cc = ds_layer['Fraction_of_cloud_cover'] if 'Fraction_of_cloud_cover' in ds_layer else 0
-    rh = ds_layer['Relative_Humidity'] if 'Relative_Humidity' in ds_layer else 0
-    lwc = ds_layer['Specific_cloud_liquid_water_content'] if 'Specific_cloud_liquid_water_content' in ds_layer else 0
-    
-    score_da = (cc * 40) + (rh * 0.4) + (lwc * 100000)
-    
-    # 2. ASSIGN SCORE BACK TO DATASET so we don't lose the other variables
-    ds_with_score = ds_layer.copy()
-    ds_with_score['Score'] = score_da
-    
-    # 3. Convert the ENTIRE dataset (Temp, RH, LWC, + Score) to DataFrame
-    df = ds_with_score.to_dataframe().reset_index()
-    
-    # 4. Filter for Saudi Arabia
-    if 'latitude' in df.columns and 'longitude' in df.columns:
+def process_time_slice(ds, time_index):
+    """Extracts a specific hour and calculates Seedability Scores."""
+    try:
+        # Select specific time and 700hPa level (Cloud Center)
+        ds_slice = ds.isel(time=time_index).sel(level=700, method='nearest')
+        
+        # Calculate Score
+        # Logic: High Cloud Cover + High Humidity + High LWC = Good
+        cc = ds_slice['Fraction_of_cloud_cover'] if 'Fraction_of_cloud_cover' in ds_slice else 0
+        rh = ds_slice['Relative_Humidity'] if 'Relative_Humidity' in ds_slice else 0
+        lwc = ds_slice['Specific_cloud_liquid_water_content'] if 'Specific_cloud_liquid_water_content' in ds_slice else 0
+        
+        # Heuristic Score (0-100)
+        score = (cc * 50) + (rh * 0.5) + (lwc * 200000)
+        
+        # Convert to DataFrame
+        df = ds_slice.to_dataframe().reset_index()
+        df['Score'] = score.values.flatten() # Add score column
+        
+        # Filter for Saudi Arabia Region
         df = df[(df['latitude'] >= 16) & (df['latitude'] <= 32) & 
                 (df['longitude'] >= 34) & (df['longitude'] <= 56)]
-    
-    # 5. Filter Noise (Score > Threshold)
-    if 'Score' in df.columns:
-        df = df[df['Score'] > 40] 
-    
-    # 6. Add timestamp string for display
-    if 'time' in df.columns:
-        df['time_str'] = df['time'].astype(str)
-    
-    return df
+        
+        # Drop NaN
+        df = df.dropna(subset=['Score'])
+        
+        return df, ds_slice.time.values
+    except Exception as e:
+        st.error(f"Processing Error: {e}")
+        return pd.DataFrame(), None
 
-def get_gemini_analysis(api_key, context_data):
-    """
-    The Brain: Sends metrics to Gemini 1.5/2.0 Flash for decision support.
-    """
-    if not api_key:
-        return "⚠️ **Gemini API Key missing.** Simulation: Conditions look favorable for hygroscopic seeding. High liquid water content detected."
+def get_gemini_brief(api_key, metrics, decision, formation):
+    """Generates the AI Explanation."""
+    if not api_key: return "⚠️ **AI Offline:** Simulation Mode. Cloud structure indicates high viability."
     
     try:
         genai.configure(api_key=api_key)
-        # Using 1.5 Flash as it's the current stable high-speed model
-        model = genai.GenerativeModel('gemini-1.5-flash') 
+        model = genai.GenerativeModel('gemini-2.0-flash-exp') # Or gemini-1.5-flash
         
         prompt = f"""
-        You are 'Kingdom Commander', an AI Cloud Seeding Meteorologist for Saudi Arabia.
-        Analyze the following cloud data taken from ERA5 satellite reanalysis:
+        Act as the 'Kingdom Commander' AI System for Saudi Arabia Cloud Seeding.
         
-        {context_data}
+        **Mission Status:** {decision}
+        **Drone Formation:** {formation}
         
-        Physics Rules:
-        - Temp -5C to -15C + Liquid Water = Glaciogenic Seeding (High Priority)
-        - Temp > 0C + High Humidity = Hygroscopic Seeding (Medium Priority)
-        - High Wind Shear = Drone Risk
+        **Atmospheric Data:**
+        {metrics}
         
-        Output a concise 'Mission Brief' (max 100 words). 
-        1. Give a GO/NO-GO decision.
-        2. Identify the Seeding Method (Hygroscopic vs Glaciogenic).
-        3. Mention specific risks.
+        1. Explain WHY this location is seedable (or not) based on the physics (LWC, Temp, Divergence).
+        2. Justify the Drone Formation (Why {formation}?). 
+           - Formation A (6 Drones) = High Cloud Spread/Divergence.
+           - Formation B (4 Drones) = Medium.
+           - Formation C (2 Drones) = Concentrated.
+        3. Keep it scientific but actionable. Max 150 words.
         """
-        
         response = model.generate_content(prompt)
         return response.text
-    except Exception as e:
-        return f"Gemini Error: {e}"
+    except:
+        return "⚠️ AI Connection Failed. Proceeding with manual protocols."
 
 # ==========================================
-# 3. UI & VISUALIZATION
+# 3. UI ARCHITECTURE
 # ==========================================
 
-ds, ds_layer = load_and_process_data()
+ds = load_data()
+if ds is None: st.stop()
 
-# Sidebar for Controls
+# Sidebar (Hidden by default, used for API Key)
 with st.sidebar:
-    st.title("⚙️ Operations Center")
-    api_key = st.text_input("Google Gemini API Key", type="password", help="Required for AI Brain")
-    st.markdown("---")
-    st.info("Dataset: ERA5 Hourly (6 Hour Window)")
-    confidence_threshold = st.slider("Min Seedability Score", 0, 100, 50)
+    st.header("⚙️ Settings")
+    api_key = st.text_input("Gemini API Key", type="password")
 
-if ds is None:
-    st.stop()
+# TABS
+tab1, tab2, tab3 = st.tabs(["🌍 Mission Control", "🎯 Target Acquisition", "🤖 AI & Drone Ops"])
 
-# --- HEADER ---
-st.title("⛈️ VisionRain | Kingdom Commander")
-st.markdown("### AI-Driven Cloud Seeding Decision Support (Google Cloud/Vertex AI Integrated)")
-
-# --- GLOBAL SCAN LOGIC ---
-all_candidates = identify_clusters(ds_layer)
-
-if all_candidates.empty:
-    st.warning("No candidates found in this data slice. Try lowering the threshold or checking the file coverage.")
-    st.stop()
-
-top_candidates = all_candidates[all_candidates['Score'] > confidence_threshold].sort_values('Score', ascending=False)
-
-# --- TABBED INTERFACE ---
-tabs = st.tabs(["🗺️ Geospatial Command", "🔬 Deep Dive Analysis", "🤖 Gemini Intelligence", "📊 Data Grid"])
-
-# 1. GEOSPATIAL COMMAND (The Visual Wow Factor)
-with tabs[0]:
-    col1, col2 = st.columns([3, 1])
+# --- TAB 1: MISSION CONTROL (The Initiative) ---
+with tab1:
+    st.markdown('<div class="big-header">🇸🇦 VisionRain: The Initiative</div>', unsafe_allow_html=True)
     
-    with col1:
-        st.markdown("#### 🛰️ 3D Seedability Heatmap (Saudi Sector)")
-        if not top_candidates.empty:
-            # PyDeck 3D Visualization (Google Cloud Style)
-            layer = pdk.Layer(
-                "HexagonLayer",
-                top_candidates,
-                get_position=["longitude", "latitude"],
-                auto_highlight=True,
-                elevation_scale=200,
-                pickable=True,
-                elevation_range=[0, 3000],
-                extruded=True,
-                coverage=1,
-                get_fill_color="[255, Score * 2, 100, 200]", # Dynamic Red/Orange color
-            )
-            
-            view_state = pdk.ViewState(
-                longitude=45.0,
-                latitude=24.0,
-                zoom=4.5,
-                min_zoom=3,
-                max_zoom=10,
-                pitch=45.0, # 3D tilt
-                bearing=0
-            )
-            
-            r = pdk.Deck(
-                layers=[layer],
-                initial_view_state=view_state,
-                tooltip={"text": "Lat: {position[1]}\nLon: {position[0]}\nDensity: {elevationValue}"},
-                map_style="mapbox://styles/mapbox/dark-v10" # Requires token or use default
-            )
-            st.pydeck_chart(r)
+    # 1. Problem & Solution
+    col_text, col_stat = st.columns([2, 1])
+    with col_text:
+        st.markdown("""
+        **The Challenge:** Saudi Arabia faces water scarcity and reactive, costly cloud seeding operations ($8,000/hr).
+        **The Solution:** An AI-Driven, Pilotless Drone Swarm system aligned with **Vision 2030**.
+        **The Goal:** Increase rainfall efficiency, reduce costs, and ensure water security.
+        """)
+    with col_stat:
+        st.metric("Global Drought Impact", "1.4 Billion People")
+        st.metric("Water Sustainability", "Critical Priority")
+
+    st.divider()
+    
+    # 2. Grand Overview (Satellite View of Saudi)
+    st.markdown('<div class="sub-header">🛰️ Kingdom-Wide Atmospheric Scan (Cloud Tops)</div>', unsafe_allow_html=True)
+    
+    # Get max cloud cover over the whole dataset for the map
+    ds_max = ds.max(dim='time').sel(level=600, method='nearest') # 600hPa = Cloud Tops
+    df_max = ds_max.to_dataframe().reset_index()
+    df_max = df_max[(df_max['latitude'] >= 16) & (df_max['latitude'] <= 32) & (df_max['longitude'] >= 34) & (df_max['longitude'] <= 56)]
+    
+    # Simple Density Map
+    st.map(df_max[df_max['Fraction_of_cloud_cover'] > 0.5], latitude='latitude', longitude='longitude', size=20, color='#4285F4')
+    st.caption("Blue points indicate persistent cloud cover detected > 600hPa across the scanning window.")
+
+
+# --- TAB 2: TARGET ACQUISITION (The Data) ---
+with tab2:
+    st.markdown('<div class="sub-header">⏳ Temporal Scan (Hour 1 - 6)</div>', unsafe_allow_html=True)
+    
+    # 1. Time Slider
+    hour_idx = st.slider("Select Scan Hour (1 = Start, 6 = End)", 0, 5, 0)
+    
+    # 2. Process Data for this hour
+    df_hour, timestamp = process_time_slice(ds, hour_idx)
+    st.write(f"**Scanning Time:** {str(timestamp)}")
+    
+    # 3. Seedability Map (Highlighted Regions)
+    st.markdown("#### 📍 Seedability Heatmap")
+    
+    # PyDeck Map for "Google Cloud" feel
+    layer = pdk.Layer(
+        "ScatterplotLayer",
+        df_hour[df_hour['Score'] > 20],
+        get_position=["longitude", "latitude"],
+        get_color="[255, Score * 2, 50, 160]",
+        get_radius=15000,
+        pickable=True,
+    )
+    view_state = pdk.ViewState(latitude=24.0, longitude=45.0, zoom=4.5)
+    r = pdk.Deck(layers=[layer], initial_view_state=view_state, tooltip={"text": "Score: {Score}"})
+    st.pydeck_chart(r)
+    
+    # 4. Regional Table
+    st.markdown("#### 📋 Priority Targets (High Seedability)")
+    # Sort and show top
+    top_targets = df_hour.sort_values(by='Score', ascending=False).head(10)
+    
+    # Interactive Table - User clicks a row to "Select" (Simulated via Selectbox for stability)
+    st.dataframe(top_targets[['latitude', 'longitude', 'Score', 'Fraction_of_cloud_cover', 'Specific_cloud_liquid_water_content', 'Temperature']].style.background_gradient(cmap='Reds'))
+    
+    # 5. Selected Region Deep Dive
+    st.markdown('<div class="sub-header">🔬 Target Deep Dive (All Metrics)</div>', unsafe_allow_html=True)
+    
+    selected_target_idx = st.selectbox("Select Target from List:", top_targets.index, format_func=lambda x: f"Lat: {top_targets.loc[x,'latitude']:.2f}, Score: {top_targets.loc[x,'Score']:.0f}")
+    target_row = top_targets.loc[selected_target_idx]
+    
+    # Store selection for Tab 3
+    st.session_state['target_row'] = target_row
+    st.session_state['target_time'] = timestamp
+    
+    # VISUALS FOR ALL METRICS
+    # We will show 3 columns of metrics
+    m_col1, m_col2, m_col3 = st.columns(3)
+    
+    with m_col1:
+        st.metric("Temp (°C)", f"{target_row['Temperature']:.2f}")
+        st.metric("Liquid Water (kg/kg)", f"{target_row['Specific_cloud_liquid_water_content']:.5f}")
+        st.metric("Cloud Cover (0-1)", f"{target_row['Fraction_of_cloud_cover']:.2f}")
+    
+    with m_col2:
+        st.metric("Rel. Humidity (0-1)", f"{target_row['Relative_Humidity']:.2f}")
+        # Divergence
+        div_val = target_row['Divergence'] if 'Divergence' in target_row else 0
+        st.metric("Divergence (s^-1)", f"{div_val:.2e}")
+        # Vertical Velocity
+        w_val = target_row['Vertical_velocity'] if 'Vertical_velocity' in target_row else 0
+        st.metric("Vertical Velocity (Pa/s)", f"{w_val:.2f}")
+
+    with m_col3:
+        # Wind
+        u = target_row['U_component_of_wind'] if 'U_component_of_wind' in target_row else 0
+        v = target_row['V_component_of_wind'] if 'V_component_of_wind' in target_row else 0
+        speed = np.sqrt(u**2 + v**2)
+        st.metric("Wind Speed (m/s)", f"{speed:.2f}")
+        st.metric("Geopotential", f"{target_row['Geopotential']:.0f}")
+        
+    # Graphical Deep Dive (Temperature & LWC)
+    st.markdown("##### 📉 Atmospheric Profile")
+    chart_df = pd.DataFrame({
+        "Metric": ["Cloud Cover", "Humidity", "Liquid Water (Scaled)"],
+        "Value": [target_row['Fraction_of_cloud_cover'], target_row['Relative_Humidity'], target_row['Specific_cloud_liquid_water_content']*10000]
+    })
+    st.bar_chart(chart_df.set_index("Metric"))
+
+
+# --- TAB 3: AI & DRONE OPS ---
+with tab3:
+    if 'target_row' in st.session_state:
+        target = st.session_state['target_row']
+        
+        st.markdown('<div class="sub-header">🤖 AI Mission Commander</div>', unsafe_allow_html=True)
+        
+        col_ai_viz, col_ai_desc = st.columns([1, 1])
+        
+        # 1. Determine Seeding Logic
+        is_seedable = target['Score'] > 40
+        
+        # 2. Determine Drone Formation
+        # Logic: 
+        # High Cloud Cover (>0.8) OR High Divergence -> Spread out -> Formation A (6 Drones)
+        # Medium Cloud Cover (0.4-0.8) -> Formation B (4 Drones)
+        # Low/Concentrated -> Formation C (2 Drones)
+        
+        cc = target['Fraction_of_cloud_cover']
+        if cc > 0.8:
+            formation = "Formation A (6 Drones)"
+            drones = 6
+            spread_desc = "High Cloud Spread detected. Max coverage required."
+        elif cc > 0.4:
+            formation = "Formation B (4 Drones)"
+            drones = 4
+            spread_desc = "Moderate Cloud Spread. Standard grid required."
         else:
-            st.warning("No clusters found meeting current threshold.")
+            formation = "Formation C (2 Drones)"
+            drones = 2
+            spread_desc = "Concentrated Cloud Core. Precision strike required."
 
-    with col2:
-        st.markdown("#### 🎯 Priority Clusters")
-        st.write("Identified high-potential zones across the 6-hour window.")
-        
-        # Group by location (approximate) to show unique storms
-        # We round lat/lon to group nearby pixels
-        unique_storms = top_candidates.copy()
-        unique_storms['lat_round'] = unique_storms['latitude'].round(1)
-        unique_storms['lon_round'] = unique_storms['longitude'].round(1)
-        unique_storms = unique_storms.drop_duplicates(subset=['lat_round', 'lon_round']).head(5)
-        
-        for idx, row in unique_storms.iterrows():
-            with st.expander(f"Target {idx} (Score: {row['Score']:.0f})"):
-                st.write(f"📍 **{row['latitude']:.2f}, {row['longitude']:.2f}**")
-                st.write(f"🕒 Time: {row['time_str']}")
-                if st.button(f"Analyze Target {idx}", key=f"btn_{idx}"):
-                    st.session_state['selected_lat'] = row['latitude']
-                    st.session_state['selected_lon'] = row['longitude']
-                    st.session_state['selected_time'] = row['time']
-
-# 2. DEEP DIVE (Time Evolution)
-with tabs[1]:
-    if 'selected_lat' in st.session_state:
-        lat = st.session_state['selected_lat']
-        lon = st.session_state['selected_lon']
-        
-        st.markdown(f"### 📍 Target Analysis: {lat:.2f} N, {lon:.2f} E")
-        
-        # Extract 6-hour time series for this specific location
-        # Get all levels for this location
-        loc_ds = ds.sel(latitude=lat, longitude=lon, method='nearest')
-        
-        # Convert to dataframe for plotting
-        loc_df = loc_ds.to_dataframe().reset_index()
-        
-        # FILTER: Just look at 700hPa for the time series overview
-        loc_700 = loc_df[loc_df['level'] == 700]
-        
-        col_g1, col_g2 = st.columns(2)
-        
-        with col_g1:
-            st.markdown("#### ⏳ Cloud Evolution (6 Hours)")
-            # Dual axis plot: Liquid Water vs Cloud Cover
-            fig_time = go.Figure()
-            if 'Specific_cloud_liquid_water_content' in loc_700:
-                fig_time.add_trace(go.Scatter(x=loc_700['time'], y=loc_700['Specific_cloud_liquid_water_content'],
-                                         name='Liquid Water', line=dict(color='#00d4ff', width=3)))
-            if 'Fraction_of_cloud_cover' in loc_700:
-                fig_time.add_trace(go.Scatter(x=loc_700['time'], y=loc_700['Fraction_of_cloud_cover'],
-                                         name='Cloud Cover', yaxis='y2', line=dict(color='#888888', dash='dot')))
+        with col_ai_viz:
+            st.markdown("#### 📡 Drone Formation Preview")
+            # Visualize Drone Positions relative to Cloud Center (0,0)
+            # Create synthetic drone coordinates for the plot
+            if drones == 6:
+                drone_pos = pd.DataFrame({'x': [-1, 1, -2, 2, 0, 0], 'y': [1, 1, 0, 0, -1, -2]})
+            elif drones == 4:
+                drone_pos = pd.DataFrame({'x': [-1, 1, -1, 1], 'y': [1, 1, -1, -1]})
+            else:
+                drone_pos = pd.DataFrame({'x': [-0.5, 0.5], 'y': [0, 0]})
             
-            fig_time.update_layout(
-                yaxis=dict(title="LWC (kg/kg)"),
-                yaxis2=dict(title="Cloud Fraction", overlaying='y', side='right'),
-                template="plotly_dark",
-                legend=dict(orientation="h", y=1.1)
-            )
-            st.plotly_chart(fig_time, use_container_width=True)
-            
-        with col_g2:
-            st.markdown("#### 🌡️ Stability & Temp (Vertical Profile)")
-            # Pick the specific time selected or the time of max score
-            # For simplicity, we plot the Mean profile over 6 hours
-            if 'level' in loc_df:
-                mean_profile = loc_df.groupby('level').mean(numeric_only=True).reset_index()
-                
-                fig_skew = go.Figure()
-                fig_skew.add_trace(go.Scatter(x=mean_profile['Temperature'], y=mean_profile['level'],
-                                         name='Temp (°C)', line=dict(color='red', width=3)))
-                fig_skew.add_trace(go.Scatter(x=mean_profile['Relative_Humidity']*100, y=mean_profile['level'],
-                                         name='RH (%)', line=dict(color='green', width=2)))
-                
-                fig_skew.update_layout(
-                    yaxis=dict(title="Pressure (hPa)", autorange="reversed"),
-                    xaxis=dict(title="Value"),
-                    title="Mean Vertical Profile (6hr Avg)",
-                    template="plotly_dark"
-                )
-                st.plotly_chart(fig_skew, use_container_width=True)
+            fig_drones = px.scatter(drone_pos, x='x', y='y', title=f"{formation}", size_max=20)
+            fig_drones.update_traces(marker=dict(size=20, symbol="triangle-up", color="#00ff00"))
+            fig_drones.update_layout(xaxis_visible=False, yaxis_visible=False, template="plotly_dark", bg_color="rgba(0,0,0,0)")
+            st.plotly_chart(fig_drones, use_container_width=True)
 
-# 3. GEMINI INTELLIGENCE
-with tabs[2]:
-    if 'selected_lat' in st.session_state:
-        st.markdown("### 🤖 Gemini 2.0 Flash: Mission Brief")
-        
-        # Prepare Data for LLM
-        sel_time = st.session_state['selected_time']
-        
-        # Grab the specific slice
-        point_data = ds.sel(latitude=st.session_state['selected_lat'], 
-                           longitude=st.session_state['selected_lon'], 
-                           time=sel_time, method='nearest').sel(level=700, method='nearest')
-        
-        # Build Safe Dictionary
-        metrics_dict = {
-            "Location": f"{st.session_state['selected_lat']:.2f}, {st.session_state['selected_lon']:.2f}",
-            "Time": str(sel_time.values),
-            "Temperature_700hPa": float(point_data['Temperature']) if 'Temperature' in point_data else "N/A",
-            "Humidity_700hPa": float(point_data['Relative_Humidity']) if 'Relative_Humidity' in point_data else "N/A",
-            "Liquid_Water_Content": float(point_data['Specific_cloud_liquid_water_content']) if 'Specific_cloud_liquid_water_content' in point_data else "N/A",
-            "Vertical_Velocity": float(point_data['Vertical_velocity']) if 'Vertical_velocity' in point_data else "N/A",
-            "Wind_U": float(point_data['U_component_of_wind']) if 'U_component_of_wind' in point_data else "N/A",
-            "Wind_V": float(point_data['V_component_of_wind']) if 'V_component_of_wind' in point_data else "N/A",
-        }
-        
-        col_ai1, col_ai2 = st.columns([1, 2])
-        
-        with col_ai1:
-            st.json(metrics_dict)
-        
-        with col_ai2:
-            if st.button("GENERATE AI MISSION BRIEF"):
-                with st.spinner("Gemini is analyzing atmospheric physics..."):
-                    ai_response = get_gemini_analysis(api_key, str(metrics_dict))
+        with col_ai_desc:
+            st.markdown(f"**Target:** {target['latitude']:.2f}, {target['longitude']:.2f}")
+            st.markdown(f"**Seedability Score:** {target['Score']:.0f}/100")
+            
+            if is_seedable:
+                st.success("✅ STATUS: SEEDABLE")
+                st.info(f"**Strategy:** {formation}")
+                st.caption(f"Reasoning: {spread_desc}")
+                
+                if st.button("🚀 DEPLOY DRONES", type="primary"):
+                    with st.spinner("Gemini 2.0 Calculating Trajectories..."):
+                        # Get AI Analysis
+                        metrics_str = f"Temp: {target['Temperature']}C, LWC: {target['Specific_cloud_liquid_water_content']}, CloudCover: {cc}"
+                        brief = get_gemini_brief(api_key, metrics_str, "GO", formation)
                     
-                st.markdown(f"""
-                <div class="gemini-box">
-                    <h3>⚡ Gemini Assessment</h3>
-                    {ai_response}
-                </div>
-                """, unsafe_allow_html=True)
-                
-                # BigQuery Simulation Log
-                if "GO" in ai_response.upper():
-                    st.toast("Auto-logged 'GO' decision to BigQuery", icon="✅")
-    else:
-        st.info("Please select a target from the Geospatial Command tab first.")
+                    st.markdown("---")
+                    st.markdown("### 🛰️ Mission Log (Gemini Analysis)")
+                    st.write(brief)
+                    st.toast("Drones Launched Successfully!", icon="🚁")
+            else:
+                st.error("❌ STATUS: NOT SUITABLE")
+                st.write("Atmospheric conditions do not meet ionization thresholds.")
 
-# 4. DATA GRID
-with tabs[3]:
-    st.markdown("### 📊 Raw Scientific Data (Filtered)")
-    # Filter columns to only those that exist
-    display_cols = ['time', 'latitude', 'longitude', 'Score', 'Temperature', 'Relative_Humidity', 'Specific_cloud_liquid_water_content']
-    final_cols = [c for c in display_cols if c in top_candidates.columns]
-    
-    st.dataframe(top_candidates[final_cols])
+    else:
+        st.info("Please select a target in Tab 2 to initialize Drone Ops.")
