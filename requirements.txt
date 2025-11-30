@@ -1,19 +1,13 @@
 streamlit
-google-generativeai
-pillow
+pandas
 numpy
 matplotlib
-requests
+seaborn
+scipy
+netCDF4
+xarray
 folium
 streamlit-folium
-pandas
-xarray
-netCDF4
-h5netcdf
-cfgrib
-firebase-admin
-scipy
-earthengine-api
-geemap
-
+Pillow
+google-generativeai
 
