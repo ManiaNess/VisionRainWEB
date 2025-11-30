@@ -4,5 +4,7 @@ netCDF4
 pandas
 numpy
 plotly
+pydeck
+google-generativeai
 matplotlib
 scipy
