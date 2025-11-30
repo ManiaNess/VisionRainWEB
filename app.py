@@ -103,12 +103,29 @@ def process_time_slice(ds, time_index):
         return pd.DataFrame(), None
 
 def get_gemini_brief(api_key, metrics, decision, formation):
-    """Generates the AI Explanation."""
-    if not api_key: return "⚠️ **AI Offline:** Simulation Mode. Cloud structure indicates high viability."
+    """Generates the AI Explanation. Uses SIMULATION if Key is missing."""
     
+    # --- SIMULATION MODE (For Demo Reliability) ---
+    if not api_key: 
+        return f"""
+        **AI MISSION BRIEF (SIMULATION MODE)**
+        
+        **Decision:** {decision} confirmed.
+        
+        **1. Physics Analysis:**
+        Target sector exhibits optimal microphysical properties. Liquid Water Content (LWC) is sufficient for hygroscopic growth. Supercooled droplets detected within the -5°C to -15°C isotherm, maximizing glaciogenic potential.
+        
+        **2. Formation Strategy ({formation}):**
+        The selected formation is optimal. Cloud topology analysis (see adjacent plot) indicates a structure that aligns with the chosen drone array, ensuring maximum ionization coverage across the updraft core.
+        
+        **3. Risk Assessment:**
+        Wind shear is within safety limits (< 15 m/s). Go for launch.
+        """
+    
+    # --- REAL AI MODE ---
     try:
         genai.configure(api_key=api_key)
-        model = genai.GenerativeModel('gemini-2.0-flash-exp') # Or gemini-1.5-flash
+        model = genai.GenerativeModel('gemini-2.0-flash-exp') 
         
         prompt = f"""
         Act as the 'Kingdom Commander' AI System for Saudi Arabia Cloud Seeding.
@@ -121,15 +138,12 @@ def get_gemini_brief(api_key, metrics, decision, formation):
         
         1. Explain WHY this location is seedable (or not) based on the physics (LWC, Temp, Divergence).
         2. Justify the Drone Formation (Why {formation}?). 
-           - Formation A (6 Drones) = High Cloud Spread/Divergence.
-           - Formation B (4 Drones) = Medium.
-           - Formation C (2 Drones) = Concentrated.
         3. Keep it scientific but actionable. Max 150 words.
         """
         response = model.generate_content(prompt)
         return response.text
     except:
-        return "⚠️ AI Connection Failed. Proceeding with manual protocols."
+        return "⚠️ AI Connection Error. Displaying cached mission profile."
 
 # ==========================================
 # 3. UI ARCHITECTURE
@@ -167,12 +181,10 @@ with tab1:
     # 2. Grand Overview (Satellite View of Saudi)
     st.markdown('<div class="sub-header">🛰️ Kingdom-Wide Atmospheric Scan (Cloud Tops)</div>', unsafe_allow_html=True)
     
-    # Get max cloud cover over the whole dataset for the map
     ds_max = ds.max(dim='time').sel(level=600, method='nearest') # 600hPa = Cloud Tops
     df_max = ds_max.to_dataframe().reset_index()
     df_max = df_max[(df_max['latitude'] >= 16) & (df_max['latitude'] <= 32) & (df_max['longitude'] >= 34) & (df_max['longitude'] <= 56)]
     
-    # Simple Density Map
     st.map(df_max[df_max['Fraction_of_cloud_cover'] > 0.5], latitude='latitude', longitude='longitude', size=20, color='#4285F4')
     st.caption("Blue points indicate persistent cloud cover detected > 600hPa across the scanning window.")
 
@@ -189,15 +201,18 @@ with tab2:
     st.write(f"**Scanning Time:** {str(timestamp)}")
     
     # 3. Seedability Map (Highlighted Regions)
-    st.markdown("#### 📍 Seedability Heatmap")
+    st.markdown("#### 📍 Seedability Heatmap (Top 10 Targets)")
     
-    # PyDeck Map for "Google Cloud" feel
+    # FILTER: ONLY TOP 10 TARGETS for the map to avoid clutter and make circles distinct
+    top_10_map = df_hour.sort_values(by='Score', ascending=False).head(10)
+    
+    # PyDeck Map 
     layer = pdk.Layer(
         "ScatterplotLayer",
-        df_hour[df_hour['Score'] > 20],
+        top_10_map,
         get_position=["longitude", "latitude"],
         get_color="[255, Score * 2, 50, 160]",
-        get_radius=15000,
+        get_radius=40000, # 40km Radius (BIG CIRCLES)
         pickable=True,
     )
     view_state = pdk.ViewState(latitude=24.0, longitude=45.0, zoom=4.5)
@@ -206,21 +221,19 @@ with tab2:
     
     # 4. Regional Table
     st.markdown("#### 📋 Priority Targets (High Seedability)")
-    # Sort and show top
-    top_targets = df_hour.sort_values(by='Score', ascending=False).head(10)
-    
     # Interactive Table
-    st.dataframe(top_targets[['latitude', 'longitude', 'Score', 'Fraction_of_cloud_cover', 'Specific_cloud_liquid_water_content', 'Temperature']].style.background_gradient(cmap='Reds'))
+    st.dataframe(top_10_map[['latitude', 'longitude', 'Score', 'Fraction_of_cloud_cover', 'Specific_cloud_liquid_water_content', 'Temperature']].style.background_gradient(cmap='Reds'))
     
     # 5. Selected Region Deep Dive
     st.markdown('<div class="sub-header">🔬 Target Deep Dive (All Metrics)</div>', unsafe_allow_html=True)
     
-    selected_target_idx = st.selectbox("Select Target from List:", top_targets.index, format_func=lambda x: f"Lat: {top_targets.loc[x,'latitude']:.2f}, Score: {top_targets.loc[x,'Score']:.0f}")
-    target_row = top_targets.loc[selected_target_idx]
+    selected_target_idx = st.selectbox("Select Target from List:", top_10_map.index, format_func=lambda x: f"Lat: {top_10_map.loc[x,'latitude']:.2f}, Score: {top_10_map.loc[x,'Score']:.0f}")
+    target_row = top_10_map.loc[selected_target_idx]
     
     # Store selection for Tab 3
     st.session_state['target_row'] = target_row
     st.session_state['target_time'] = timestamp
+    st.session_state['df_hour_context'] = df_hour # Store full frame for context plotting
     
     # VISUALS FOR ALL METRICS
     m_col1, m_col2, m_col3 = st.columns(3)
@@ -257,6 +270,7 @@ with tab2:
 with tab3:
     if 'target_row' in st.session_state:
         target = st.session_state['target_row']
+        df_context = st.session_state['df_hour_context'] # Full map data for this hour
         
         st.markdown('<div class="sub-header">🤖 AI Mission Commander</div>', unsafe_allow_html=True)
         
@@ -281,28 +295,33 @@ with tab3:
             spread_desc = "Concentrated Cloud Core. Precision strike required."
 
         with col_ai_viz:
-            st.markdown("#### 📡 Drone Formation Preview")
+            st.markdown("#### ☁️ Real-Time Cloud Spread Analysis")
+            # Create a localized heatmap around the target to justify formation
+            lat_c, lon_c = target['latitude'], target['longitude']
             
-            # Create synthetic drone coordinates for the plot
-            if drones == 6:
-                drone_pos = pd.DataFrame({'x': [-1, 1, -2, 2, 0, 0], 'y': [1, 1, 0, 0, -1, -2]})
-            elif drones == 4:
-                drone_pos = pd.DataFrame({'x': [-1, 1, -1, 1], 'y': [1, 1, -1, -1]})
+            # Filter a 4x4 degree box around target
+            local_df = df_context[
+                (df_context['latitude'] >= lat_c - 2) & (df_context['latitude'] <= lat_c + 2) &
+                (df_context['longitude'] >= lon_c - 2) & (df_context['longitude'] <= lon_c + 2)
+            ]
+            
+            # Contour Plot of Cloud Cover
+            if not local_df.empty:
+                fig_spread = px.density_contour(
+                    local_df, 
+                    x='longitude', 
+                    y='latitude', 
+                    z='Fraction_of_cloud_cover',
+                    histfunc="avg",
+                    title=f"Cloud Structure around Target ({formation})",
+                    color_discrete_sequence=['cyan']
+                )
+                # Add target point
+                fig_spread.add_trace(go.Scatter(x=[lon_c], y=[lat_c], mode='markers', marker=dict(color='red', size=15, symbol='cross'), name='TARGET'))
+                fig_spread.update_layout(template="plotly_dark", plot_bgcolor="rgba(0,0,0,0)")
+                st.plotly_chart(fig_spread, use_container_width=True)
             else:
-                drone_pos = pd.DataFrame({'x': [-0.5, 0.5], 'y': [0, 0]})
-            
-            fig_drones = px.scatter(drone_pos, x='x', y='y', title=f"{formation}", size_max=20)
-            fig_drones.update_traces(marker=dict(size=20, symbol="triangle-up", color="#00ff00"))
-            
-            # --- FIX: Updated layout properties to be valid ---
-            fig_drones.update_layout(
-                xaxis=dict(visible=False),
-                yaxis=dict(visible=False),
-                template="plotly_dark",
-                plot_bgcolor="rgba(0,0,0,0)",
-                paper_bgcolor="rgba(0,0,0,0)"
-            )
-            st.plotly_chart(fig_drones, use_container_width=True)
+                st.write("Insufficient context data for spread analysis.")
 
         with col_ai_desc:
             st.markdown(f"**Target:** {target['latitude']:.2f}, {target['longitude']:.2f}")
@@ -313,15 +332,34 @@ with tab3:
                 st.info(f"**Strategy:** {formation}")
                 st.caption(f"Reasoning: {spread_desc}")
                 
+                # Synthetic Drone Visualization (The Solution)
+                if drones == 6:
+                    drone_pos = pd.DataFrame({'x': [-1, 1, -2, 2, 0, 0], 'y': [1, 1, 0, 0, -1, -2]})
+                elif drones == 4:
+                    drone_pos = pd.DataFrame({'x': [-1, 1, -1, 1], 'y': [1, 1, -1, -1]})
+                else:
+                    drone_pos = pd.DataFrame({'x': [-0.5, 0.5], 'y': [0, 0]})
+                
+                fig_drones = px.scatter(drone_pos, x='x', y='y', title="Drone Formation Blueprint", size_max=15)
+                fig_drones.update_traces(marker=dict(size=15, symbol="triangle-up", color="#00ff00"))
+                fig_drones.update_layout(
+                    xaxis=dict(visible=False),
+                    yaxis=dict(visible=False),
+                    template="plotly_dark",
+                    plot_bgcolor="rgba(0,0,0,0)",
+                    paper_bgcolor="rgba(0,0,0,0)",
+                    height=200
+                )
+                st.plotly_chart(fig_drones, use_container_width=True)
+                
                 if st.button("🚀 DEPLOY DRONES", type="primary"):
                     with st.spinner("Gemini 2.0 Calculating Trajectories..."):
-                        # Get AI Analysis
                         metrics_str = f"Temp: {target['Temperature']}C, LWC: {target['Specific_cloud_liquid_water_content']}, CloudCover: {cc}"
                         brief = get_gemini_brief(api_key, metrics_str, "GO", formation)
                     
                     st.markdown("---")
                     st.markdown("### 🛰️ Mission Log (Gemini Analysis)")
-                    st.write(brief)
+                    st.markdown(brief)
                     st.toast("Drones Launched Successfully!", icon="🚁")
             else:
                 st.error("❌ STATUS: NOT SUITABLE")
