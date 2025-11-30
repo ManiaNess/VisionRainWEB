@@ -63,7 +63,7 @@ def load_and_process_data():
     Loads ERA5, handles renaming, and computes aggregation over the 6-hour window.
     """
     if not os.path.exists(DATA_FILE):
-        return None
+        return None, None
     
     try:
         ds = xr.open_dataset(DATA_FILE, engine='netcdf4')
@@ -87,9 +87,12 @@ def load_and_process_data():
         if 'Temperature' in ds: ds['Temperature'] -= 273.15
         
         # --- 6-HOUR AGGREGATION SCAN ---
-        # Instead of just taking the last hour, we look for the MAX potential over the file duration
         # Focus on Cloud Layer (~700hPa)
-        ds_layer = ds.sel(level=700, method='nearest')
+        # We ensure we select the level but keep the dataset structure
+        if 'level' in ds.coords:
+            ds_layer = ds.sel(level=700, method='nearest')
+        else:
+            ds_layer = ds # Fallback if no levels
         
         return ds, ds_layer
     except Exception as e:
@@ -99,33 +102,35 @@ def load_and_process_data():
 def identify_clusters(ds_layer):
     """
     Scans the entire 6-hour window and all of Saudi Arabia.
-    Returns the top seedable clusters.
+    Returns the top seedable clusters WITH all meteorological data.
     """
-    # Create a 2D map of "Max Seedability Score" across the 6 hours
-    # Logic: We take the MAX cloud cover and water content over the time dimension
+    # 1. Calculate Score (DataArray)
+    # Check if variables exist to avoid KeyError during calculation
+    cc = ds_layer['Fraction_of_cloud_cover'] if 'Fraction_of_cloud_cover' in ds_layer else 0
+    rh = ds_layer['Relative_Humidity'] if 'Relative_Humidity' in ds_layer else 0
+    lwc = ds_layer['Specific_cloud_liquid_water_content'] if 'Specific_cloud_liquid_water_content' in ds_layer else 0
     
-    # 1. Calculate Score for every pixel/time
-    # Score = (Cloud Cover * 50) + (LWC normalized * 50) + (RH/2)
-    # Note: LWC is small (e.g., 0.0001), so we multiply by huge factor
+    score_da = (cc * 40) + (rh * 0.4) + (lwc * 100000)
     
-    score_da = (
-        (ds_layer['Fraction_of_cloud_cover'] * 40) + 
-        (ds_layer['Relative_Humidity'] * 0.4) + 
-        (ds_layer['Specific_cloud_liquid_water_content'] * 100000)
-    )
+    # 2. ASSIGN SCORE BACK TO DATASET so we don't lose the other variables
+    ds_with_score = ds_layer.copy()
+    ds_with_score['Score'] = score_da
     
-    # 2. Flatten to dataframe to find top candidates across ALL times
-    df = score_da.to_dataframe(name='Score').reset_index()
+    # 3. Convert the ENTIRE dataset (Temp, RH, LWC, + Score) to DataFrame
+    df = ds_with_score.to_dataframe().reset_index()
     
-    # 3. Filter for Saudi Arabia
-    df = df[(df['latitude'] >= 16) & (df['latitude'] <= 32) & 
-            (df['longitude'] >= 34) & (df['longitude'] <= 56)]
+    # 4. Filter for Saudi Arabia
+    if 'latitude' in df.columns and 'longitude' in df.columns:
+        df = df[(df['latitude'] >= 16) & (df['latitude'] <= 32) & 
+                (df['longitude'] >= 34) & (df['longitude'] <= 56)]
     
-    # 4. Filter Noise
-    df = df[df['Score'] > 40] # Minimum threshold
+    # 5. Filter Noise (Score > Threshold)
+    if 'Score' in df.columns:
+        df = df[df['Score'] > 40] 
     
-    # 5. Add timestamp string for display
-    df['time_str'] = df['time'].astype(str)
+    # 6. Add timestamp string for display
+    if 'time' in df.columns:
+        df['time_str'] = df['time'].astype(str)
     
     return df
 
@@ -139,7 +144,6 @@ def get_gemini_analysis(api_key, context_data):
     try:
         genai.configure(api_key=api_key)
         # Using 1.5 Flash as it's the current stable high-speed model
-        # You can change to "gemini-2.0-flash-exp" if you have access
         model = genai.GenerativeModel('gemini-1.5-flash') 
         
         prompt = f"""
@@ -187,6 +191,11 @@ st.markdown("### AI-Driven Cloud Seeding Decision Support (Google Cloud/Vertex A
 
 # --- GLOBAL SCAN LOGIC ---
 all_candidates = identify_clusters(ds_layer)
+
+if all_candidates.empty:
+    st.warning("No candidates found in this data slice. Try lowering the threshold or checking the file coverage.")
+    st.stop()
+
 top_candidates = all_candidates[all_candidates['Score'] > confidence_threshold].sort_values('Score', ascending=False)
 
 # --- TABBED INTERFACE ---
@@ -277,10 +286,12 @@ with tabs[1]:
             st.markdown("#### ⏳ Cloud Evolution (6 Hours)")
             # Dual axis plot: Liquid Water vs Cloud Cover
             fig_time = go.Figure()
-            fig_time.add_trace(go.Scatter(x=loc_700['time'], y=loc_700['Specific_cloud_liquid_water_content'],
-                                     name='Liquid Water', line=dict(color='#00d4ff', width=3)))
-            fig_time.add_trace(go.Scatter(x=loc_700['time'], y=loc_700['Fraction_of_cloud_cover'],
-                                     name='Cloud Cover', yaxis='y2', line=dict(color='#888888', dash='dot')))
+            if 'Specific_cloud_liquid_water_content' in loc_700:
+                fig_time.add_trace(go.Scatter(x=loc_700['time'], y=loc_700['Specific_cloud_liquid_water_content'],
+                                         name='Liquid Water', line=dict(color='#00d4ff', width=3)))
+            if 'Fraction_of_cloud_cover' in loc_700:
+                fig_time.add_trace(go.Scatter(x=loc_700['time'], y=loc_700['Fraction_of_cloud_cover'],
+                                         name='Cloud Cover', yaxis='y2', line=dict(color='#888888', dash='dot')))
             
             fig_time.update_layout(
                 yaxis=dict(title="LWC (kg/kg)"),
@@ -294,21 +305,22 @@ with tabs[1]:
             st.markdown("#### 🌡️ Stability & Temp (Vertical Profile)")
             # Pick the specific time selected or the time of max score
             # For simplicity, we plot the Mean profile over 6 hours
-            mean_profile = loc_df.groupby('level').mean(numeric_only=True).reset_index()
-            
-            fig_skew = go.Figure()
-            fig_skew.add_trace(go.Scatter(x=mean_profile['Temperature'], y=mean_profile['level'],
-                                     name='Temp (°C)', line=dict(color='red', width=3)))
-            fig_skew.add_trace(go.Scatter(x=mean_profile['Relative_Humidity']*100, y=mean_profile['level'],
-                                     name='RH (%)', line=dict(color='green', width=2)))
-            
-            fig_skew.update_layout(
-                yaxis=dict(title="Pressure (hPa)", autorange="reversed"),
-                xaxis=dict(title="Value"),
-                title="Mean Vertical Profile (6hr Avg)",
-                template="plotly_dark"
-            )
-            st.plotly_chart(fig_skew, use_container_width=True)
+            if 'level' in loc_df:
+                mean_profile = loc_df.groupby('level').mean(numeric_only=True).reset_index()
+                
+                fig_skew = go.Figure()
+                fig_skew.add_trace(go.Scatter(x=mean_profile['Temperature'], y=mean_profile['level'],
+                                         name='Temp (°C)', line=dict(color='red', width=3)))
+                fig_skew.add_trace(go.Scatter(x=mean_profile['Relative_Humidity']*100, y=mean_profile['level'],
+                                         name='RH (%)', line=dict(color='green', width=2)))
+                
+                fig_skew.update_layout(
+                    yaxis=dict(title="Pressure (hPa)", autorange="reversed"),
+                    xaxis=dict(title="Value"),
+                    title="Mean Vertical Profile (6hr Avg)",
+                    template="plotly_dark"
+                )
+                st.plotly_chart(fig_skew, use_container_width=True)
 
 # 3. GEMINI INTELLIGENCE
 with tabs[2]:
@@ -316,7 +328,6 @@ with tabs[2]:
         st.markdown("### 🤖 Gemini 2.0 Flash: Mission Brief")
         
         # Prepare Data for LLM
-        # We need to give it the exact metrics for the selected time
         sel_time = st.session_state['selected_time']
         
         # Grab the specific slice
@@ -324,15 +335,16 @@ with tabs[2]:
                            longitude=st.session_state['selected_lon'], 
                            time=sel_time, method='nearest').sel(level=700, method='nearest')
         
+        # Build Safe Dictionary
         metrics_dict = {
             "Location": f"{st.session_state['selected_lat']:.2f}, {st.session_state['selected_lon']:.2f}",
             "Time": str(sel_time.values),
-            "Temperature_700hPa": float(point_data['Temperature']),
-            "Humidity_700hPa": float(point_data['Relative_Humidity']),
-            "Liquid_Water_Content": float(point_data['Specific_cloud_liquid_water_content']),
-            "Vertical_Velocity": float(point_data['Vertical_velocity']),
-            "Wind_U": float(point_data['U_component_of_wind']),
-            "Wind_V": float(point_data['V_component_of_wind']),
+            "Temperature_700hPa": float(point_data['Temperature']) if 'Temperature' in point_data else "N/A",
+            "Humidity_700hPa": float(point_data['Relative_Humidity']) if 'Relative_Humidity' in point_data else "N/A",
+            "Liquid_Water_Content": float(point_data['Specific_cloud_liquid_water_content']) if 'Specific_cloud_liquid_water_content' in point_data else "N/A",
+            "Vertical_Velocity": float(point_data['Vertical_velocity']) if 'Vertical_velocity' in point_data else "N/A",
+            "Wind_U": float(point_data['U_component_of_wind']) if 'U_component_of_wind' in point_data else "N/A",
+            "Wind_V": float(point_data['V_component_of_wind']) if 'V_component_of_wind' in point_data else "N/A",
         }
         
         col_ai1, col_ai2 = st.columns([1, 2])
@@ -361,4 +373,8 @@ with tabs[2]:
 # 4. DATA GRID
 with tabs[3]:
     st.markdown("### 📊 Raw Scientific Data (Filtered)")
-    st.dataframe(top_candidates[['time', 'latitude', 'longitude', 'Score', 'Temperature', 'Relative_Humidity', 'Specific_cloud_liquid_water_content']])
+    # Filter columns to only those that exist
+    display_cols = ['time', 'latitude', 'longitude', 'Score', 'Temperature', 'Relative_Humidity', 'Specific_cloud_liquid_water_content']
+    final_cols = [c for c in display_cols if c in top_candidates.columns]
+    
+    st.dataframe(top_candidates[final_cols])
