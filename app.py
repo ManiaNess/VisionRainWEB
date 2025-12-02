@@ -200,8 +200,8 @@ with st.sidebar:
     st.header("⚙️ Settings")
     api_key = st.text_input("Gemini API Key", type="password")
 
-# TABS
-tab1, tab2, tab3 = st.tabs(["🌍 Mission Control", "🏙️ City Targets", "🤖 AI & Drone Ops"])
+# TABS - UPDATED WITH PRD TAB
+tab1, tab2, tab3, tab4 = st.tabs(["🌍 Mission Control", "🏙️ City Targets", "🤖 AI & Drone Ops", "📸 PRD Assets"])
 
 # --- TAB 1: MISSION CONTROL ---
 with tab1:
@@ -386,3 +386,166 @@ with tab3:
                 st.write("Conditions below threshold.")
     else:
         st.info("Select a city in Tab 2 first.")
+
+# --- TAB 4: PRD ASSETS (NEW) ---
+with tab4:
+    st.markdown('<div class="big-header">📸 Technical PRD Assets Generator</div>', unsafe_allow_html=True)
+    st.info("This section generates high-fidelity plots for your documentation. Screenshot these!")
+
+    # Controls
+    prd_time_idx = st.slider("Select Forecast Hour", 0, 5, 0, key="prd_time")
+    prd_level = st.selectbox("Select Isobaric Level (hPa)", ds.level.values, index=2, key="prd_level") # Default to ~700hPa if available
+    
+    # Data Slice for PRD
+    try:
+        ds_prd = ds.isel(time=prd_time_idx).sel(level=prd_level, method='nearest')
+        df_prd = ds_prd.to_dataframe().reset_index()
+        # Filter Region
+        df_prd = df_prd[(df_prd['latitude'] >= 16) & (df_prd['latitude'] <= 32) & 
+                        (df_prd['longitude'] >= 34) & (df_prd['longitude'] <= 56)]
+    except Exception as e:
+        st.error(f"Data slicing error: {e}")
+        st.stop()
+
+    # SECTION 1: ATMOSPHERIC HEATMAPS
+    st.markdown("### 1. Global Atmospheric Conditions")
+    st.caption("Use these for the 'Atmospheric Analysis' section of the PRD.")
+    
+    col_p1, col_p2, col_p3 = st.columns(3)
+    
+    with col_p1:
+        fig_temp = px.density_heatmap(
+            df_prd, x='longitude', y='latitude', z='Temperature', 
+            nbinsx=30, nbinsy=30, color_continuous_scale='Magma', title=f"Temp (C) @ {prd_level}hPa"
+        )
+        fig_temp.update_layout(margin=dict(l=0, r=0, t=30, b=0), template="plotly_dark")
+        st.plotly_chart(fig_temp, use_container_width=True)
+
+    with col_p2:
+        fig_hum = px.density_heatmap(
+            df_prd, x='longitude', y='latitude', z='Relative_Humidity', 
+            nbinsx=30, nbinsy=30, color_continuous_scale='Viridis', title=f"Humidity (%) @ {prd_level}hPa"
+        )
+        fig_hum.update_layout(margin=dict(l=0, r=0, t=30, b=0), template="plotly_dark")
+        st.plotly_chart(fig_hum, use_container_width=True)
+        
+    with col_p3:
+        fig_lwc = px.density_heatmap(
+            df_prd, x='longitude', y='latitude', z='Specific_cloud_liquid_water_content', 
+            nbinsx=30, nbinsy=30, color_continuous_scale='Blues', title=f"Liquid Water Content @ {prd_level}hPa"
+        )
+        fig_lwc.update_layout(margin=dict(l=0, r=0, t=30, b=0), template="plotly_dark")
+        st.plotly_chart(fig_lwc, use_container_width=True)
+
+    st.divider()
+
+    # SECTION 2: VERTICAL PROFILE (SOUNDING)
+    st.markdown("### 2. Vertical Atmospheric Profile (Sounding)")
+    st.caption("Critical for Tier 2 checks (Stability & Cloud Depth). Shows metrics across altitudes.")
+    
+    prd_city = st.selectbox("Select City for Vertical Analysis", list(SAUDI_CITIES.keys()), key="prd_city")
+    city_coords = SAUDI_CITIES[prd_city]
+    
+    # Extract vertical profile for city
+    try:
+        ds_profile = ds.isel(time=prd_time_idx).sel(
+            latitude=city_coords['lat'], 
+            longitude=city_coords['lon'], 
+            method='nearest'
+        )
+        df_profile = ds_profile.to_dataframe().reset_index()
+        
+        # Plotting
+        fig_profile = go.Figure()
+        
+        # Temp Trace
+        fig_profile.add_trace(go.Scatter(
+            x=df_profile['Temperature'], y=df_profile['level'], 
+            mode='lines+markers', name='Temp (C)', line=dict(color='orange')
+        ))
+        # Humidity Trace (Secondary X?) - Let's keep it simple for now or normalize
+        fig_profile.add_trace(go.Scatter(
+            x=df_profile['Relative_Humidity'], y=df_profile['level'], 
+            mode='lines+markers', name='Humidity (%)', line=dict(color='cyan')
+        ))
+        
+        fig_profile.update_layout(
+            title=f"Atmospheric Sounding: {prd_city}",
+            yaxis=dict(title="Pressure Level (hPa)", autorange="reversed"), # Reverse Y because pressure drops with height
+            xaxis=dict(title="Value"),
+            template="plotly_dark",
+            height=500
+        )
+        st.plotly_chart(fig_profile, use_container_width=True)
+        
+    except Exception as e:
+        st.error(f"Could not generate profile: {e}")
+
+    st.divider()
+
+    # SECTION 3: 3D VOLUMETRIC VISUALIZATION
+    st.markdown("### 3. 3D Cloud Volumetric Visualization")
+    st.caption("Visualizes the 'Fuel' (Liquid Water) in 3D space. High LWC = Best Seeding Targets.")
+    
+    # Get 3D chunk (All levels, current time)
+    try:
+        ds_3d = ds.isel(time=prd_time_idx)
+        df_3d = ds_3d.to_dataframe().reset_index()
+        # Filter for region and ONLY significant cloud water (to clean up plot)
+        df_3d_filt = df_3d[
+            (df_3d['latitude'] >= 20) & (df_3d['latitude'] <= 26) & 
+            (df_3d['longitude'] >= 39) & (df_3d['longitude'] <= 47) &
+            (df_3d['Specific_cloud_liquid_water_content'] > 0.00001) # Filter out dry air
+        ]
+        
+        if not df_3d_filt.empty:
+            fig_3d = px.scatter_3d(
+                df_3d_filt, x='longitude', y='latitude', z='level',
+                color='Specific_cloud_liquid_water_content',
+                size='Specific_cloud_liquid_water_content',
+                color_continuous_scale='Blues',
+                opacity=0.6,
+                title="3D Liquid Water Content Distribution (Central Region)"
+            )
+            # Invert Z axis for pressure
+            fig_3d.update_scenes(zaxis=dict(autorange="reversed"))
+            fig_3d.update_layout(template="plotly_dark", height=600)
+            st.plotly_chart(fig_3d, use_container_width=True)
+        else:
+            st.warning("Not enough liquid water in this time slice/region for 3D plot.")
+            
+    except Exception as e:
+        st.error(f"3D Plot Error: {e}")
+
+    st.divider()
+    
+    # SECTION 4: WIND DYNAMICS
+    st.markdown("### 4. Wind Vector Field Analysis")
+    st.caption("Essential for 'Operational Safety' (Tier 5). Shows wind direction and intensity.")
+    
+    # Subsample for cleaner arrows
+    df_wind = df_prd.iloc[::20, :] # Take every 20th point to avoid overcrowding
+    
+    fig_wind = go.Figure()
+    
+    # Cone plot (simulated with scatter for 2D representation) or Quiver
+    # Using simple scatter with markers for now as Quiver in plotly is heavy
+    fig_wind.add_trace(go.Cone(
+        x=df_wind['longitude'],
+        y=df_wind['latitude'],
+        z=np.zeros(len(df_wind)), # Flat on Z
+        u=df_wind['U_component_of_wind'],
+        v=df_wind['V_component_of_wind'],
+        w=np.zeros(len(df_wind)),
+        colorscale='Turbo',
+        sizemode="absolute",
+        sizeref=2
+    ))
+    
+    fig_wind.update_layout(
+        title=f"Wind Vector Field @ {prd_level}hPa",
+        scene=dict(aspectratio=dict(x=1, y=1, z=0.1)),
+        template="plotly_dark",
+        height=500
+    )
+    st.plotly_chart(fig_wind, use_container_width=True)
